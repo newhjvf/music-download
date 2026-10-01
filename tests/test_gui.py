@@ -79,3 +79,43 @@ def test_validation_messages(root, monkeypatch):
     app.start(dry_run=True)
     assert "CSV" in shown[0] and "Spotify" in shown[1]
     assert app.worker is None
+
+
+def test_update_splash_status_from_worker_thread(root, tmp_path, monkeypatch):
+    """Regression: status texts come from a worker thread; Tk must only be
+    touched from the main thread ("main thread is not in main loop")."""
+    from musicdl import updater
+
+    shown = []
+    monkeypatch.setattr(updater, "install_root", lambda *a: tmp_path)
+
+    def fake_check(status):
+        status("Скачиваю обновление…")
+        time.sleep(0.2)
+        status("Устанавливаю новые компоненты…")
+        return False
+
+    monkeypatch.setattr(updater, "check_and_update", fake_check)
+    original_set = tk.StringVar.set
+
+    def recording_set(self, value):
+        shown.append(value)
+        return original_set(self, value)
+
+    monkeypatch.setattr(tk.StringVar, "set", recording_set)
+    errors = []
+    monkeypatch.setattr(gui.logging.getLogger("musicdl"), "exception", lambda *a, **k: errors.append(a))
+    assert gui.run_update_check(root) is False
+    assert errors == []
+    assert "Скачиваю обновление…" in shown and "Устанавливаю новые компоненты…" in shown
+
+
+def test_update_splash_restarts_after_update(root, tmp_path, monkeypatch):
+    from musicdl import updater
+
+    monkeypatch.setattr(updater, "install_root", lambda *a: tmp_path)
+    monkeypatch.setattr(updater, "check_and_update", lambda status: True)
+    started = []
+    monkeypatch.setattr(gui.subprocess, "Popen", lambda args, cwd=None: started.append((args, cwd)))
+    assert gui.run_update_check(root) is True
+    assert started and started[0][0][-1] == "--updated" and started[0][1] == str(tmp_path)
