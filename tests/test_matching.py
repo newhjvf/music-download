@@ -199,3 +199,73 @@ def test_no_slow_view_count_requests():
     assert find_match(CountsViews({QUERY: [a, b]}), song()).found
     assert CountsViews.calls == 0
     assert time.monotonic() - started < 0.5
+
+
+# --- not-original versions, fast YouTube, clear "not found" ----------------
+
+from musicdl.matching import acceptable, not_original_words  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "title,result_title",
+    [
+        ("Музыки больше не будет", "FREE FOR PROFIT | Кишлак x семьсот семь type beat «Музыки больше не будет»"),
+        ("Силиконовый Гном", "ДИСС НА ИВАНГАЯ (Бит: Мэйби Бэйби – Силиконовый гном)"),
+        ("Господи, прости меня", "Господи, прости меня (Live)"),
+        ("Клуб 27", "Клуб 27 (Кавер)"),
+        ("Хаос", "Хаос (slowed + reverb)"),
+    ],
+)
+def test_not_original_versions_rejected(title, result_title):
+    s = song(title=title, artists=("X",))
+    assert not acceptable(s, make_result("r", result_title, ["X"], 120))
+
+
+def test_marker_in_song_title_is_allowed():
+    s = song(title="Хаос (Remix)", artists=("X",))
+    assert not_original_words(s, make_result("r", "Хаос (Remix)", ["X"], 120)) == []
+
+
+def test_original_preferred_over_better_ranked_beat():
+    s = song(title="Музыки больше не будет", artists=("Кишлак",))
+    beat = make_result("beat", "Кишлак - Музыки больше не будет (type beat)", ["Кишлак"], 130)
+    original = make_result("orig", "Музыки больше не будет", ["Кишлак"], 130)
+    match = find_match(StubProvider({"кишлак - музыки больше не будет": [beat, original]}), s)
+    assert match.url == original.url
+
+
+def test_plain_not_found_after_a_source_error():
+    failing = StubProvider({}, fail=RuntimeError("Sign in to confirm you're not a bot"))
+    match = find_match([failing, SecondSource({})], song())
+    assert match.error == "not found"
+
+
+def test_fast_youtube_reads_only_the_result_list(monkeypatch):
+    import yt_dlp
+
+    from musicdl.matching import SOURCE_NAMES, _fast_youtube_class
+
+    captured = {}
+
+    class FakeYDL:
+        def __init__(self, options):
+            captured.update(options)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, query, download):
+            captured["query"] = query
+            return {"entries": [{"id": "abc", "title": "Song", "duration": 200, "channel": "Artist", "view_count": 5}, None]}
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    provider = _fast_youtube_class()(output_format="mp3")
+    results = provider.get_results("artist - song")
+    assert captured["extract_flat"] == "in_playlist" and captured["query"] == "ytsearch10:artist - song"
+    assert [(r.url, r.name, r.author, r.duration) for r in results] == [
+        ("https://www.youtube.com/watch?v=abc", "Song", "Artist", 200)
+    ]
+    assert SOURCE_NAMES[provider.name] == "YouTube"
