@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--dry-run", action="store_true", help="только поиск и сопоставление, без скачивания")
     common.add_argument("--bitrate", default="320k", help="битрейт mp3, например 192k или 320k (по умолчанию 320k)")
     common.add_argument("--report", type=Path, help="куда писать not_found.csv (по умолчанию в папку --out)")
-    common.add_argument("--only-verified", action="store_true", help="брать только официальные треки YouTube Music")
+    common.add_argument("--only-verified", action="store_true", help="только официальные треки YouTube Music (без YouTube и SoundCloud)")
     common.add_argument("-v", "--verbose", action="store_true", help="подробный лог")
 
     parser = argparse.ArgumentParser(
@@ -61,15 +61,17 @@ def match_table(matches: List[MatchResult]) -> Table:
     table = Table(title="Сопоставление", show_lines=False)
     table.add_column("#", justify="right")
     table.add_column("Трек")
-    table.add_column("Найдено на YouTube Music")
+    table.add_column("Найдено (источник)")
     table.add_column("Длит.", justify="right")
     table.add_column("Ссылка")
     for index, match in enumerate(matches, 1):
         track = f"{match.song.artist} - {match.song.name}"
         if match.found:
             found = f"{match.author} - {match.title}" if match.title else "?"
-            if not match.verified:
-                found += " [dim](видео)[/dim]"
+            source = match.source or "YouTube Music"
+            if source == "YouTube Music" and not match.verified:
+                source += ", видео"
+            found += f" [dim]({source})[/dim]"
             table.add_row(str(index), track, found, format_duration(match.duration), match.url)
         else:
             table.add_row(str(index), track, f"[red]{match.error}[/red]", "", "")

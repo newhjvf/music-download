@@ -48,6 +48,14 @@ def human_status(message: str, percent: int) -> str:
     return text
 
 
+def source_label(match) -> str:
+    """'YouTube Music', 'YouTube Music, видео', 'SoundCloud'..."""
+    source = match.source or "YouTube Music"
+    if source == "YouTube Music" and not match.verified:
+        return "YouTube Music, видео"
+    return source
+
+
 def load_settings() -> Dict[str, Any]:
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -170,7 +178,7 @@ class App:
         for column, title, width, stretch in (
             ("n", "№", 40, False),
             ("track", "Трек", 280, True),
-            ("found", "Найдено на YouTube Music", 300, True),
+            ("found", "Найдено (источник)", 300, True),
             ("duration", "Длит.", 60, False),
             ("status", "Статус", 150, False),
         ):
@@ -367,13 +375,12 @@ class App:
         item = self.rows.get(match.song.url)
         self.progress.step(1)
         self.searched += 1
-        self.status.set(f"Ищу на YouTube Music: {self.searched} из {self.search_total}…")
+        self.status.set(f"Ищу: {self.searched} из {self.search_total}…")
         if item is None:
             return
         if match.found:
             found = f"{match.author} - {match.title}" if match.title else match.url
-            if not match.verified:
-                found += "  (видео)"
+            found += f"  ({source_label(match)})"
             self.links[item] = match.url
             self.table.item(
                 item,
