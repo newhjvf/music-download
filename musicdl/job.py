@@ -7,14 +7,17 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from spotdl.types.song import Song
 
+from musicdl.cache import MatchCache
 from musicdl.matching import MatchResult, default_provider_factory, find_matches
 from musicdl.pipeline import downloader_settings, prepare_for_download, split_existing, write_report
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CACHE = Path.home() / ".musicdl" / "matches.json"
 
 
 @dataclass
@@ -28,6 +31,8 @@ class JobOptions:
     only_verified: bool = False
     report_path: Optional[Path] = None
     env_file: Optional[Path] = None
+    # None = always search; read at creation so tests can redirect it
+    cache_path: Optional[Path] = field(default_factory=lambda: DEFAULT_CACHE)
 
     @property
     def report(self) -> Path:
@@ -133,6 +138,11 @@ def download_songs(
     return results
 
 
+def search_threads(download_threads: int) -> int:
+    """Searching is much lighter than downloading: use twice the parallelism (max 8)."""
+    return max(1, min(8, download_threads * 2))
+
+
 def run_job(
     options: JobOptions,
     events: Optional[JobEvents] = None,
@@ -153,11 +163,33 @@ def run_job(
     events.info(f"Треков: {len(songs)}, уже скачано: {len(existing)}, к обработке: {len(todo)}")
 
     if todo:
-        events.info("Ищу треки (YouTube Music, YouTube, SoundCloud)…")
         events.phase("search", len(todo))
-        summary.matches = find_matches(
-            todo, options.threads, provider_factory, options.only_verified, on_result=events.matched
+        cache = MatchCache(options.cache_path)
+        known: Dict[int, MatchResult] = {}
+        for index, song in enumerate(todo):
+            match = cache.get(song, options.only_verified)
+            if match:
+                known[index] = match
+                events.matched(match)
+        to_search = [song for index, song in enumerate(todo) if index not in known]
+        if known:
+            events.info(f"Уже найдены раньше: {len(known)}, ищу остальные: {len(to_search)}…")
+        else:
+            events.info("Ищу треки (YouTube Music, YouTube, SoundCloud)…")
+
+        searched = iter(
+            find_matches(
+                to_search,
+                search_threads(options.threads),
+                provider_factory,
+                options.only_verified,
+                on_result=events.matched,
+            )
         )
+        summary.matches = [known[i] if i in known else next(searched) for i in range(len(todo))]
+        for match in summary.matches:
+            cache.put(match, options.only_verified)
+        cache.save()
     summary.failed = [(m.song, m.error or "not found") for m in summary.matches if not m.found]
 
     if not options.dry_run:

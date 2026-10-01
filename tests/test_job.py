@@ -93,3 +93,55 @@ def test_bad_csv_is_user_error(tmp_path):
 def test_bad_spotify_link_is_user_error(tmp_path):
     with pytest.raises(JobError):
         run_job(JobOptions(source_kind="url", source="https://example.com", out_dir=tmp_path))
+
+
+def test_found_matches_are_reused(tmp_path):
+    provider_calls = []
+
+    def factory():
+        provider_calls.append(1)
+        return StubProvider(RESULTS)
+
+    def no_search_factory():
+        raise AssertionError("everything found should come from the cache")
+
+    first = run_job(options(tmp_path, dry_run=True), provider_factory=factory)
+    assert first.succeeded == 2 and provider_calls
+
+    # second check: found tracks come from the cache, only the 2 missing ones are searched
+    searched = []
+
+    def counting_factory():
+        provider = StubProvider(RESULTS)
+        original = provider.get_results
+
+        def get_results(term, **kw):
+            searched.append(term)
+            return original(term, **kw)
+
+        provider.get_results = get_results
+        return provider
+
+    matched = []
+    second = run_job(
+        options(tmp_path, dry_run=True),
+        JobEvents(matched=matched.append),
+        provider_factory=counting_factory,
+    )
+    assert second.succeeded == 2
+    assert len(matched) == 4
+    assert not any("bohemian" in term or "teen spirit" in term for term in searched)
+    assert [m.url for m in second.matches if m.found] == [m.url for m in first.matches if m.found]
+
+
+def test_cache_disabled(tmp_path):
+    opts = options(tmp_path, dry_run=True)
+    opts.cache_path = None
+    run_job(opts, provider_factory=lambda: StubProvider(RESULTS))
+    assert not (tmp_path / "matches.json").exists()
+
+
+def test_search_threads():
+    from musicdl.job import search_threads
+
+    assert [search_threads(n) for n in (1, 2, 4, 8)] == [2, 4, 8, 8]
