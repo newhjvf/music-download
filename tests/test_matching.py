@@ -1,3 +1,4 @@
+import time
 import pytest
 
 from spotdl.utils.matching import order_results as spotdl_order_results
@@ -181,3 +182,20 @@ def test_provider_chain_skips_broken_source():
     chain = ProviderChain([broken, lambda: good])
     assert list(chain) == [good]
     assert list(chain) == [good]  # created once
+
+
+def test_no_slow_view_count_requests():
+    class CountsViews(StubProvider):
+        calls = 0
+
+        def get_views(self, url):
+            CountsViews.calls += 1
+            time.sleep(1)
+            return 1000
+
+    a = make_result("a", "Smells Like Teen Spirit", ["Nirvana"], 301)
+    b = make_result("b", "Smells Like Teen Spirit", ["Nirvana"], 302)
+    started = time.monotonic()
+    assert find_match(CountsViews({QUERY: [a, b]}), song()).found
+    assert CountsViews.calls == 0
+    assert time.monotonic() - started < 0.5

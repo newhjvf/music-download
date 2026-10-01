@@ -12,6 +12,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -80,6 +81,42 @@ def open_path(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+PALETTE = {
+    "dark": {"ok": "#6ccb5f", "bad": "#ff6b6b", "active": "#60cdff", "muted": "#9a9a9a", "accent": "#60cdff"},
+    "light": {"ok": "#0f7b0f", "bad": "#c42b1c", "active": "#005fb8", "muted": "#6e6e6e", "accent": "#005fb8"},
+}
+
+FINAL_STATUSES = ("✔ скачано", "✖ ошибка загрузки", "✔ уже есть")
+
+
+def apply_theme(root: tk.Misc, theme: str) -> str:
+    """Windows 11 look (sv-ttk) if available, otherwise the best built-in theme."""
+    try:
+        import sv_ttk
+
+        sv_ttk.set_theme(theme)
+        return theme
+    except Exception:
+        try:
+            ttk.Style(root).theme_use("vista" if sys.platform == "win32" else "clam")
+        except tk.TclError:
+            pass
+        return "light"
+
+
+def ui_font(size: int, weight: str = "normal") -> tuple:
+    family = "Segoe UI Variable Display" if sys.platform == "win32" else "TkDefaultFont"
+    return (family, size, weight)
+
+
+def format_seconds(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    return f"{minutes}:{secs:02d}"
+
+
 class App:
     """The main window. Work runs in a background thread; it sends events
     through ``self.events`` and the UI applies them in ``_poll``."""
@@ -91,12 +128,21 @@ class App:
         self.run_job = run_job or default_run_job
         self.events: "queue.Queue[tuple]" = queue.Queue()
         self.worker: Optional[threading.Thread] = None
+        self.cancel: Optional[threading.Event] = None
         self.rows: Dict[str, str] = {}  # song.url -> tree item
-        self.links: Dict[str, str] = {}  # tree item -> YouTube URL
-        self.searched = self.search_total = 0
+        self.links: Dict[str, str] = {}  # tree item -> found URL
+        self.active: Dict[str, str] = {}  # tree item -> text shown with a spinner
         self.report: Optional[Path] = None
+        self.searched = self.search_total = 0
+        self.phase_name = ""
+        self.phase_done = self.phase_total = 0
+        self.phase_started = 0.0
+        self.started = 0.0
+        self.spin = 0
+        self.offline = False
 
         settings = load_settings()
+        self.theme = settings.get("theme", "dark")
         self.mode = tk.StringVar(value=settings.get("mode", "csv"))
         self.csv_path = tk.StringVar(value=settings.get("csv_path", ""))
         self.link = tk.StringVar(value=settings.get("link", ""))
@@ -104,84 +150,141 @@ class App:
         self.bitrate = tk.StringVar(value=settings.get("bitrate", "320k"))
         self.threads = tk.IntVar(value=int(settings.get("threads", 4)))
         self.only_verified = tk.BooleanVar(value=bool(settings.get("only_verified", False)))
-        self.status = tk.StringVar(value="Выберите CSV-файл или вставьте ссылку Spotify, затем нажмите «Скачать».")
+        self.status = tk.StringVar(value="Выберите CSV-файл или вставьте ссылку Spotify, затем нажмите «Проверить» или «Скачать».")
+        self.timing = tk.StringVar(value="")
+        self.percent = tk.StringVar(value="")
+        self.counters = {name: tk.StringVar(value="—") for name in ("total", "existing", "found", "missing", "done")}
 
         from musicdl.updater import version_label
 
-        root.title(f"musicdl — скачивание музыки ({version_label()})")
-        root.minsize(760, 520)
-        root.geometry("980x640")
+        self.version = version_label()
+        root.title(f"musicdl — скачивание музыки ({self.version})")
+        root.minsize(900, 640)
+        root.geometry("1120x780")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.theme = apply_theme(root, self.theme)
         self._build()
+        self._apply_tags()
         self._on_mode_change()
         self.root.after(100, self._poll)
+        self.root.after(100, self._tick)
 
     # ----------------------------------------------------------------- layout
+    def _card(self, parent, title: str) -> "tuple[ttk.Frame, ttk.Frame]":
+        outer = ttk.Frame(parent, style="Card.TFrame", padding=(14, 10))
+        ttk.Label(outer, text=title, font=ui_font(11, "bold")).pack(anchor="w", pady=(0, 6))
+        inner = ttk.Frame(outer)
+        inner.pack(fill="x")
+        return outer, inner
+
     def _build(self) -> None:
-        pad = {"padx": 8, "pady": 4}
-        main = ttk.Frame(self.root, padding=10)
+        main = ttk.Frame(self.root, padding=(18, 12))
         main.pack(fill="both", expand=True)
-        main.columnconfigure(1, weight=1)
+        main.columnconfigure(0, weight=1)
 
-        source = ttk.LabelFrame(main, text=" 1. Откуда брать треки ", padding=8)
-        source.grid(row=0, column=0, columnspan=3, sticky="ew", **pad)
+        header = ttk.Frame(main)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(header, text="musicdl", font=ui_font(22, "bold")).pack(side="left")
+        ttk.Label(header, text=f"   скачивание музыки по спискам · {self.version}", foreground=self._color("muted")).pack(
+            side="left", pady=(8, 0)
+        )
+        self.theme_button = ttk.Button(header, text=self._theme_icon(), width=3, command=self.toggle_theme)
+        self.theme_button.pack(side="right")
+
+        top = ttk.Frame(main)
+        top.grid(row=1, column=0, sticky="ew")
+        top.columnconfigure(0, weight=3)
+        top.columnconfigure(1, weight=2)
+
+        source_card, source = self._card(top, "Откуда брать треки")
+        source_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         source.columnconfigure(1, weight=1)
-
-        ttk.Radiobutton(
-            source, text="CSV-файл из TuneMyMusic", value="csv", variable=self.mode, command=self._on_mode_change
-        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(source, text="CSV из TuneMyMusic", value="csv", variable=self.mode, command=self._on_mode_change).grid(
+            row=0, column=0, sticky="w"
+        )
         self.csv_entry = ttk.Entry(source, textvariable=self.csv_path)
-        self.csv_entry.grid(row=0, column=1, sticky="ew", padx=6)
+        self.csv_entry.grid(row=0, column=1, sticky="ew", padx=8)
         self.csv_button = ttk.Button(source, text="Выбрать файл…", command=self.choose_csv)
         self.csv_button.grid(row=0, column=2, sticky="ew")
-
-        ttk.Radiobutton(
-            source, text="Ссылка Spotify", value="url", variable=self.mode, command=self._on_mode_change
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-        self.link_entry = ttk.Entry(source, textvariable=self.link)
-        self.link_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=(6, 0))
-        self.paste_button = ttk.Button(source, text="Вставить", command=self.paste_link)
-        self.paste_button.grid(row=1, column=2, sticky="ew", pady=(6, 0))
-
-        target = ttk.LabelFrame(main, text=" 2. Куда сохранять ", padding=8)
-        target.grid(row=1, column=0, columnspan=3, sticky="ew", **pad)
-        target.columnconfigure(0, weight=1)
-        ttk.Entry(target, textvariable=self.out_dir).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(target, text="Выбрать папку…", command=self.choose_out_dir).grid(row=0, column=1)
-
-        options = ttk.Frame(target)
-        options.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Label(options, text="Качество:").pack(side="left")
-        ttk.Combobox(options, textvariable=self.bitrate, values=BITRATES, width=6, state="readonly").pack(
-            side="left", padx=(4, 16)
+        ttk.Radiobutton(source, text="Ссылка Spotify", value="url", variable=self.mode, command=self._on_mode_change).grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
         )
-        ttk.Label(options, text="Одновременно:").pack(side="left")
-        ttk.Spinbox(options, from_=1, to=8, textvariable=self.threads, width=4).pack(side="left", padx=(4, 16))
-        ttk.Checkbutton(
-            options, text="Только официальные треки (без клипов и каверов)", variable=self.only_verified
-        ).pack(side="left")
+        self.link_entry = ttk.Entry(source, textvariable=self.link)
+        self.link_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=(8, 0))
+        self.paste_button = ttk.Button(source, text="Вставить", command=self.paste_link)
+        self.paste_button.grid(row=1, column=2, sticky="ew", pady=(8, 0))
+
+        target_card, target = self._card(top, "Куда и как сохранять")
+        target_card.grid(row=0, column=1, sticky="nsew")
+        target.columnconfigure(0, weight=1)
+        ttk.Entry(target, textvariable=self.out_dir).grid(row=0, column=0, columnspan=3, sticky="ew", padx=(0, 8))
+        ttk.Button(target, text="Папка…", command=self.choose_out_dir).grid(row=0, column=3)
+        options = ttk.Frame(target)
+        options.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(options, text="Качество").pack(side="left")
+        ttk.Combobox(options, textvariable=self.bitrate, values=BITRATES, width=6, state="readonly").pack(side="left", padx=(6, 14))
+        ttk.Label(options, text="Одновременно").pack(side="left")
+        ttk.Spinbox(options, from_=1, to=8, textvariable=self.threads, width=4).pack(side="left", padx=6)
+        verified_box = ttk.Frame(target)
+        verified_box.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        try:
+            ttk.Checkbutton(
+                verified_box, text="Только официальные треки", variable=self.only_verified, style="Switch.TCheckbutton"
+            ).pack(side="left")
+        except tk.TclError:
+            ttk.Checkbutton(verified_box, text="Только официальные треки", variable=self.only_verified).pack(side="left")
 
         actions = ttk.Frame(main)
-        actions.grid(row=2, column=0, columnspan=3, sticky="ew", **pad)
-        self.check_button = ttk.Button(actions, text="🔍 Проверить (без скачивания)", command=lambda: self.start(True))
-        self.check_button.pack(side="left")
-        self.download_button = ttk.Button(actions, text="⬇  Скачать", command=lambda: self.start(False))
-        self.download_button.pack(side="left", padx=8)
-        ttk.Label(actions, text="«Проверить» показывает, что найдётся, ничего не скачивая.", foreground="#666").pack(
-            side="left", padx=8
-        )
+        actions.grid(row=2, column=0, sticky="ew", pady=12)
+        self.download_button = ttk.Button(actions, text="⬇  Скачать", command=lambda: self.start(False), style="Accent.TButton")
+        self.download_button.pack(side="left", ipadx=14, ipady=4)
+        self.check_button = ttk.Button(actions, text="🔍  Проверить без скачивания", command=lambda: self.start(True))
+        self.check_button.pack(side="left", padx=8, ipady=4)
+        self.stop_button = ttk.Button(actions, text="■  Стоп", command=self.stop, state="disabled")
+        self.stop_button.pack(side="left", ipady=4)
+        ttk.Label(actions, textvariable=self.timing, foreground=self._color("muted")).pack(side="right")
+
+        tiles = ttk.Frame(main)
+        tiles.grid(row=3, column=0, sticky="ew")
+        self.tile_labels = {}
+        for index, (name, caption, color) in enumerate(
+            (
+                ("total", "в списке", None),
+                ("existing", "уже были", "muted"),
+                ("found", "найдено", "active"),
+                ("missing", "не найдено", "bad"),
+                ("done", "скачано", "ok"),
+            )
+        ):
+            tiles.columnconfigure(index, weight=1)
+            tile = ttk.Frame(tiles, style="Card.TFrame", padding=(14, 8))
+            tile.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 8, 0))
+            number = ttk.Label(tile, textvariable=self.counters[name], font=ui_font(22, "bold"))
+            number.pack(anchor="w")
+            self.tile_labels[name] = (number, color)
+            ttk.Label(tile, text=caption, foreground=self._color("muted")).pack(anchor="w")
+
+        progress = ttk.Frame(main)
+        progress.grid(row=4, column=0, sticky="ew", pady=(12, 2))
+        progress.columnconfigure(0, weight=1)
+        self.progress = ttk.Progressbar(progress, mode="determinate")
+        self.progress.grid(row=0, column=0, sticky="ew")
+        ttk.Label(progress, textvariable=self.percent, width=6, anchor="e").grid(row=0, column=1)
+        self.status_label = ttk.Label(main, textvariable=self.status, wraplength=1000)
+        self.status_label.grid(row=5, column=0, sticky="w", pady=(2, 8))
 
         table_frame = ttk.Frame(main)
-        table_frame.grid(row=3, column=0, columnspan=3, sticky="nsew", **pad)
-        main.rowconfigure(3, weight=1)
-        columns = ("n", "track", "found", "duration", "status")
+        table_frame.grid(row=6, column=0, sticky="nsew")
+        main.rowconfigure(6, weight=1)
+        columns = ("n", "track", "found", "source", "duration", "status")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=12)
         for column, title, width, stretch in (
-            ("n", "№", 40, False),
+            ("n", "№", 44, False),
             ("track", "Трек", 280, True),
-            ("found", "Найдено (источник)", 300, True),
+            ("found", "Найдено", 280, True),
+            ("source", "Источник", 130, False),
             ("duration", "Длит.", 60, False),
-            ("status", "Статус", 150, False),
+            ("status", "Статус", 190, False),
         ):
             self.table.heading(column, text=title)
             self.table.column(column, width=width, stretch=stretch, anchor="e" if column in ("n", "duration") else "w")
@@ -189,26 +292,35 @@ class App:
         self.table.configure(yscrollcommand=scroll.set)
         self.table.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-        self.table.tag_configure("ok", foreground="#1a7f37")
-        self.table.tag_configure("bad", foreground="#c62828")
-        self.table.tag_configure("muted", foreground="#777")
         self.table.bind("<Double-1>", self._open_row_link)
-        ttk.Label(main, text="Двойной щелчок по строке открывает найденное видео в браузере.", foreground="#666").grid(
-            row=7, column=0, columnspan=3, sticky="w", padx=8
-        )
-
-        self.progress = ttk.Progressbar(main, mode="determinate")
-        self.progress.grid(row=4, column=0, columnspan=3, sticky="ew", **pad)
-        ttk.Label(main, textvariable=self.status, wraplength=900).grid(row=5, column=0, columnspan=3, sticky="w", **pad)
 
         bottom = ttk.Frame(main)
-        bottom.grid(row=6, column=0, columnspan=3, sticky="ew", **pad)
-        ttk.Button(bottom, text="📂 Открыть папку с музыкой", command=self.open_out_dir).pack(side="left")
-        self.report_button = ttk.Button(
-            bottom, text="Открыть список ненайденных", command=self.open_report, state="disabled"
-        )
+        bottom.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(bottom, text="📂  Папка с музыкой", command=self.open_out_dir).pack(side="left")
+        self.report_button = ttk.Button(bottom, text="Список ненайденных", command=self.open_report, state="disabled")
         self.report_button.pack(side="left", padx=8)
+        ttk.Label(bottom, text="Двойной щелчок по строке — открыть найденное в браузере", foreground=self._color("muted")).pack(
+            side="left", padx=8
+        )
         ttk.Button(bottom, text="Журнал ошибок", command=lambda: self._open_if_exists(LOG_FILE)).pack(side="right")
+
+    def _color(self, name: str) -> str:
+        return PALETTE.get(self.theme, PALETTE["light"])[name]
+
+    def _theme_icon(self) -> str:
+        return "☀" if self.theme == "dark" else "🌙"
+
+    def _apply_tags(self) -> None:
+        for tag in ("ok", "bad", "active", "muted"):
+            self.table.tag_configure(tag, foreground=self._color(tag))
+        for number, color in self.tile_labels.values():
+            number.configure(foreground=self._color(color) if color else "")
+
+    def toggle_theme(self) -> None:
+        self.theme = apply_theme(self.root, "light" if self.theme == "dark" else "dark")
+        self.theme_button.configure(text=self._theme_icon())
+        self._apply_tags()
+        self._save()
 
     def _on_mode_change(self) -> None:
         csv_mode = self.mode.get() == "csv"
@@ -297,6 +409,7 @@ class App:
             dry_run=dry_run,
             only_verified=bool(self.only_verified.get()),
             env_file=Path.cwd() / ".env",
+            cancel=self.cancel,
         )
 
     def start(self, dry_run: bool) -> None:
@@ -310,15 +423,33 @@ class App:
         self.table.delete(*self.table.get_children())
         self.rows.clear()
         self.links.clear()
+        self.active.clear()
         self.report = None
         self.report_button.configure(state="disabled")
-        self.progress.configure(value=0, maximum=1)
+        for var in self.counters.values():
+            var.set("0")
+        self.counters["total"].set("…")
+        self.progress.configure(mode="indeterminate", value=0)
+        self.progress.start(12)
+        self.percent.set("")
+        self.timing.set("")
+        self.phase_name = ""
+        self.started = time.monotonic()
+        self.cancel = threading.Event()
+        self.offline = False
+        self.status_label.configure(foreground="")
         self._set_busy(True)
-        self.status.set("Запуск…")
+        self.status.set("Загружаю список треков…")
 
         options = self.options(dry_run)
         self.worker = threading.Thread(target=self._work, args=(options,), daemon=True)
         self.worker.start()
+
+    def stop(self) -> None:
+        if self.cancel is not None and not self.cancel.is_set():
+            self.cancel.set()
+            self.stop_button.configure(state="disabled")
+            self.status.set("Останавливаю: дожидаюсь треков, которые уже ищутся…")
 
     def _work(self, options) -> None:
         from musicdl.job import JobError, JobEvents
@@ -330,6 +461,8 @@ class App:
             matched=lambda match: post(("match", match, options.dry_run)),
             download_status=lambda key, status, percent: post(("download", key, status, percent)),
             phase=lambda name, count: post(("phase", name, count)),
+            searching=lambda key, source: post(("searching", key, source)),
+            connection=lambda online: post(("connection", online)),
         )
         try:
             summary = self.run_job(options, events)
@@ -349,10 +482,41 @@ class App:
                 getattr(self, f"_on_{event[0]}")(*event[1:])
         except queue.Empty:
             pass
-        self.root.after(100, self._poll)
+        self.root.after(80, self._poll)
+
+    def _tick(self) -> None:
+        """Spinner on active rows + elapsed / remaining time."""
+        self.spin = (self.spin + 1) % len(SPINNER)
+        frame = SPINNER[self.spin]
+        for item, text in list(self.active.items()):
+            if self.table.exists(item):
+                self.table.set(item, "status", f"{frame}  {text}")
+        if self.worker and self.worker.is_alive() and self.started:
+            elapsed = time.monotonic() - self.started
+            text = f"прошло {format_seconds(elapsed)}"
+            if self.phase_total and self.phase_done:
+                per_item = (time.monotonic() - self.phase_started) / self.phase_done
+                remaining = per_item * (self.phase_total - self.phase_done)
+                text += f" · осталось ≈ {format_seconds(remaining)}"
+            self.timing.set(text)
+        self.root.after(110, self._tick)
+
+    def _advance(self) -> None:
+        self.phase_done += 1
+        self.progress.configure(value=self.phase_done)
+        if self.phase_total:
+            self.percent.set(f"{min(100, round(100 * self.phase_done / self.phase_total))}%")
+
+    def _bump(self, name: str) -> None:
+        var = self.counters[name]
+        try:
+            var.set(str(int(var.get()) + 1))
+        except ValueError:
+            var.set("1")
 
     def _on_info(self, message: str) -> None:
-        self.status.set(message)
+        if not self.offline:
+            self.status.set(message)
 
     def _on_songs(self, todo: List, existing: List) -> None:
         from musicdl.pipeline import expected_path
@@ -361,73 +525,131 @@ class App:
         for song in existing:
             number += 1
             item = self.table.insert(
-                "", "end", values=(number, f"{song.artist} - {song.name}", expected_path(song, Path(self.out_dir.get())).name, "", "✔ уже есть"), tags=("muted",)
+                "",
+                "end",
+                values=(number, f"{song.artist} - {song.name}", expected_path(song, Path(self.out_dir.get())).name, "", "", "✔ уже есть"),
+                tags=("muted",),
             )
             self.rows[song.url] = item
         for song in todo:
             number += 1
             self.rows[song.url] = self.table.insert(
-                "", "end", values=(number, f"{song.artist} - {song.name}", "", "", "в очереди")
+                "", "end", values=(number, f"{song.artist} - {song.name}", "", "", "", "· в очереди")
             )
+        self.counters["total"].set(str(len(todo) + len(existing)))
+        self.counters["existing"].set(str(len(existing)))
+
+    def _on_phase(self, name: str, count: int) -> None:
+        self.progress.stop()
+        self.progress.configure(mode="determinate", value=0, maximum=max(1, count))
+        self.percent.set("0%")
+        self.phase_name, self.phase_total, self.phase_done = name, count, 0
+        self.phase_started = time.monotonic()
+        if name == "search":
+            self.searched, self.search_total = 0, count
+        else:
+            self.stop_button.configure(state="disabled")
+
+    def _on_searching(self, key: str, source: str) -> None:
+        item = self.rows.get(key)
+        if item is not None:
+            self.active[item] = f"ищу · {source}"
+            self.table.item(item, tags=("active",))
+            track = self.table.set(item, "track")
+            if not self.offline:
+                self.status.set(f"Ищу {self.searched + 1}–{min(self.search_total, self.searched + int(self.threads.get()) * 2)} из {self.search_total}: «{track}» на {source}…")
 
     def _on_match(self, match, dry_run: bool) -> None:
+        from musicdl.matching import CANCELLED
         from musicdl.pipeline import format_duration
 
-        item = self.rows.get(match.song.url)
-        self.progress.step(1)
         self.searched += 1
-        self.status.set(f"Ищу: {self.searched} из {self.search_total}…")
+        self._advance()
+        item = self.rows.get(match.song.url)
         if item is None:
             return
+        self.active.pop(item, None)
+        values = (self.table.set(item, "n"), self.table.set(item, "track"))
         if match.found:
+            self._bump("found")
             found = f"{match.author} - {match.title}" if match.title else match.url
-            found += f"  ({source_label(match)})"
             self.links[item] = match.url
+            status = "✔ найдено" if dry_run else "· ждёт загрузки"
             self.table.item(
                 item,
-                values=(self.table.set(item, "n"), self.table.set(item, "track"), found, format_duration(match.duration), "✔ найдено" if dry_run else "ждёт загрузки"),
+                values=values + (found, source_label(match), format_duration(match.duration), status),
                 tags=("ok",) if dry_run else (),
             )
+        elif match.error == CANCELLED:
+            self.table.item(item, values=values + ("", "", "", "⏹ остановлено"), tags=("muted",))
         else:
+            self._bump("missing")
             not_found = match.error == "not found"
-            reason = "✖ не найдено" if not_found else "✖ ошибка поиска"
-            detail = "—" if not_found else (match.error or "")
             self.table.item(
                 item,
-                values=(self.table.set(item, "n"), self.table.set(item, "track"), detail, "", reason),
+                values=values + ("—" if not_found else (match.error or ""), "", "", "✖ не найдено" if not_found else "✖ ошибка поиска"),
                 tags=("bad",),
             )
+
+    def _on_connection(self, online: bool) -> None:
+        if online:
+            self.offline = False
+            self.status_label.configure(foreground="")
+            self.status.set("Интернет снова есть — продолжаю с того же места…")
+        else:
+            self.offline = True
+            self.status_label.configure(foreground=self._color("bad"))
+            self.status.set("⚠ Нет интернета. Жду подключения — работа продолжится сама, ничего нажимать не нужно.")
 
     def _on_download(self, key: str, status: str, percent: int) -> None:
         item = self.rows.get(key)
         if item is None:
             return
-        text = human_status(status, percent)
-        if self.table.set(item, "status") in ("✔ скачано", "✖ ошибка загрузки") and status not in ("Done", "Error"):
+        current = self.table.set(item, "status")
+        if status == "Retry":  # the job tries a failed download again
+            if current == "✖ ошибка загрузки":
+                self.phase_done = max(0, self.phase_done - 1)
+                self.progress.configure(value=self.phase_done)
+                count = self.counters["missing"]
+                count.set(str(max(0, int(count.get() or 0) - 1)))
+            self.active[item] = "повторная загрузка…"
+            self.table.set(item, "status", "повторная загрузка…")
+            self.table.item(item, tags=("active",))
             return
-        tags = ("ok",) if status in ("Done", "Skipped") else ("bad",) if status == "Error" else ()
-        if status in ("Done", "Error") and self.table.set(item, "status") not in ("✔ скачано", "✖ ошибка загрузки"):
-            self.progress.step(1)
-        self.table.set(item, "status", text)
-        self.table.item(item, tags=tags)
-
-    def _on_phase(self, name: str, count: int) -> None:
-        self.progress.configure(value=0, maximum=max(1, count))
-        if name == "search":
-            self.searched, self.search_total = 0, count
+        if current in FINAL_STATUSES:
+            return
+        if status in ("Done", "Error", "Skipped"):
+            self.active.pop(item, None)
+            self.table.set(item, "status", human_status(status, percent))
+            self.table.item(item, tags=("bad",) if status == "Error" else ("ok",))
+            self._advance()
+            self._bump("missing" if status == "Error" else "done")
+        else:
+            self.active[item] = human_status(status, percent)
+            self.table.item(item, tags=("active",))
+            self.table.see(item)
 
     def _on_done(self, summary, dry_run: bool) -> None:
         self._set_busy(False)
-        self.progress.configure(value=float(self.progress.cget("maximum")))
+        self.offline = False
+        self.status_label.configure(foreground="")
+        self.active.clear()
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=1, value=1)
+        self.percent.set("100%")
+        elapsed = format_seconds(time.monotonic() - self.started) if self.started else ""
+        self.timing.set(f"готово за {elapsed}" if elapsed else "")
         failed = len(summary.failed)
         if dry_run:
             text = f"Проверка закончена: найдено {summary.succeeded} из {summary.processed}."
         else:
             text = f"Готово: скачано {summary.succeeded} из {summary.processed}."
+        if summary.cancelled:
+            text = f"Остановлено. Обработано {summary.processed - summary.cancelled} из {summary.processed}."
         if summary.existing:
             text += f" Уже были скачаны раньше: {summary.existing}."
         if failed:
-            text += f" Не получилось: {failed} — см. «Открыть список ненайденных»."
+            text += f" Не получилось: {failed} — см. «Список ненайденных»."
         self.status.set(text)
         self.report = summary.report
         self.report_button.configure(state="normal" if summary.report else "disabled")
@@ -441,6 +663,9 @@ class App:
 
     def _on_error(self, message: str, details: Optional[str]) -> None:
         self._set_busy(False)
+        self.active.clear()
+        self.progress.stop()
+        self.progress.configure(mode="determinate", value=0)
         self.status.set(f"Ошибка: {message}")
         extra = f"\n\nПодробности записаны в журнал:\n{LOG_FILE}" if details else ""
         messagebox.showerror("musicdl", message + extra)
@@ -449,7 +674,7 @@ class App:
         state = "disabled" if busy else "normal"
         self.check_button.configure(state=state)
         self.download_button.configure(state=state)
-        self.root.configure(cursor="watch" if busy else "")
+        self.stop_button.configure(state="normal" if busy else "disabled")
 
     def _save(self) -> None:
         save_settings(
@@ -461,6 +686,7 @@ class App:
                 "bitrate": self.bitrate.get(),
                 "threads": int(self.threads.get()),
                 "only_verified": bool(self.only_verified.get()),
+                "theme": self.theme,
             }
         )
 
@@ -553,10 +779,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _enable_hidpi()
     root = tk.Tk()
     root.title("musicdl")
-    try:
-        ttk.Style(root).theme_use("vista" if sys.platform == "win32" else "clam")
-    except tk.TclError:
-        pass
+    apply_theme(root, load_settings().get("theme", "dark"))
     if "--updated" not in argv and "--no-update" not in argv and run_update_check(root):
         root.destroy()
         return 0

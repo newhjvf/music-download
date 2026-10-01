@@ -3,10 +3,11 @@ from pathlib import Path
 import pytest
 
 from musicdl.job import JobError, JobEvents, JobOptions, run_job
-from musicdl.pipeline import expected_path
+from musicdl.pipeline import MIN_FILE_SIZE, expected_path
 
 from .stubs import StubProvider, make_result
 
+FAKE_MP3 = b"ID3" + b"\0" * MIN_FILE_SIZE
 SAMPLE = Path(__file__).resolve().parent.parent / "examples" / "sample.csv"
 RESULTS = {
     "queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)],
@@ -24,7 +25,7 @@ def fake_download(songs, opts, on_status):
         on_status(song.url, "Downloading", 50)
         path = expected_path(song, opts.out_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"x")
+        path.write_bytes(FAKE_MP3)
         out.append((song, path))
     return out
 
