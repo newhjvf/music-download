@@ -24,7 +24,7 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +77,46 @@ def write_state(root: Path, state: Dict) -> None:
     (root / STATE_NAME).write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def latest_commit(fetch: Fetch = _fetch, timeout: float = 5) -> Tuple[str, str]:
+    """-> (sha, ISO date of the commit)."""
+    data = json.loads(fetch(API_URL, timeout).decode("utf-8"))
+    date = (data.get("commit") or {}).get("committer", {}).get("date", "")
+    return data["sha"], date
+
+
 def latest_sha(fetch: Fetch = _fetch, timeout: float = 5) -> str:
-    return json.loads(fetch(API_URL, timeout).decode("utf-8"))["sha"]
+    return latest_commit(fetch, timeout)[0]
+
+
+def _replace_file(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_name(target.name + ".new")
+    shutil.copy2(source, staged)
+    os.replace(staged, target)
+
+
+def _sync_dir(source: Path, target: Path) -> None:
+    """Make ``target`` contain exactly the files of ``source`` (``__pycache__``
+    ignored). Files are replaced one by one: on Windows this works even when
+    the folder itself is in use, unlike renaming the whole folder."""
+    wanted = set()
+    for file in source.rglob("*"):
+        if file.is_file() and "__pycache__" not in file.parts:
+            relative = file.relative_to(source)
+            wanted.add(relative)
+            _replace_file(file, target / relative)
+    if target.exists():
+        for file in sorted(target.rglob("*"), reverse=True):
+            relative = file.relative_to(target)
+            if "__pycache__" in relative.parts:
+                continue
+            try:
+                if file.is_file() and relative not in wanted:
+                    file.unlink()
+                elif file.is_dir() and not any(file.iterdir()):
+                    file.rmdir()
+            except OSError:
+                logger.debug("Could not remove %s", file)
 
 
 def apply_update(zip_bytes: bytes, root: Path) -> bool:
@@ -99,21 +137,24 @@ def apply_update(zip_bytes: bytes, root: Path) -> bool:
             new = source / name
             if not new.exists():
                 continue
-            target = root / name
             if new.is_dir():
-                staged = root / f".{name}.new"
-                old = root / f".{name}.old"
-                for leftover in (staged, old):
-                    shutil.rmtree(leftover, ignore_errors=True)
-                shutil.copytree(new, staged)
-                if target.exists():
-                    target.rename(old)
-                staged.rename(target)
-                shutil.rmtree(old, ignore_errors=True)
+                _sync_dir(new, root / name)
             else:
-                os.replace(shutil.copy2(new, root / f".{name}.new"), target)
+                _replace_file(new, root / name)
 
     return (root / "pyproject.toml").read_bytes() != old_pyproject
+
+
+def version_label(root: Optional[Path] = None) -> str:
+    """'версия от 01.10.2026 14:05' for the window title."""
+    root = root or install_root()
+    if root is None:
+        return "версия для разработки"
+    state = read_state(root)
+    date = state.get("date", "")
+    if len(date) >= 16:
+        return f"версия от {date[8:10]}.{date[5:7]}.{date[0:4]} {date[11:16]} UTC"
+    return "версия не определена"
 
 
 def console_python() -> str:
@@ -151,12 +192,15 @@ def check_and_update(
         return False
     state = read_state(root)
     try:
-        sha = latest_sha(fetch)
+        sha, date = latest_commit(fetch)
     except Exception as exc:  # offline, GitHub rate limit, ...
         logger.info("Update check skipped: %s", exc)
         return False
 
     if sha == state.get("sha"):
+        if date and state.get("date") != date:
+            state["date"] = date
+            write_state(root, state)
         if state.get("pip_failed"):  # retry a failed dependency install
             status("Доустанавливаю компоненты…")
             state["pip_failed"] = not pip(root)
@@ -170,7 +214,7 @@ def check_and_update(
         logger.exception("Update failed")
         return False
 
-    state = {"sha": sha, "pip_failed": False}
+    state = {"sha": sha, "date": date, "pip_failed": False}
     if deps_changed:
         status("Устанавливаю новые компоненты (может занять пару минут)…")
         state["pip_failed"] = not pip(root)
