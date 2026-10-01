@@ -516,17 +516,26 @@ def run_update_check(root: tk.Tk) -> bool:
     bar.start(15)
 
     result: Dict[str, bool] = {}
+    # Tk may only be touched from the main thread (Python 3.14 on Windows
+    # raises "main thread is not in main loop" otherwise): the worker only
+    # puts texts into a queue, the loop below shows them.
+    texts: "queue.Queue[str]" = queue.Queue()
 
     def work() -> None:
         try:
-            result["updated"] = updater.check_and_update(lambda text: root.after(0, message.set, text))
+            result["updated"] = updater.check_and_update(texts.put)
         except Exception:  # never block the program because of the updater
             logging.getLogger("musicdl").exception("Updater crashed")
             result["updated"] = False
 
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
-    while thread.is_alive():
+    while thread.is_alive() or not texts.empty():
+        try:
+            while True:
+                message.set(texts.get_nowait())
+        except queue.Empty:
+            pass
         root.update()
         thread.join(0.05)
     bar.stop()
