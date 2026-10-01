@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musicdl"
+version = "0.1.0"
+description = "Personal CLI: download music by metadata (TuneMyMusic CSV / Spotify links) using spotDL"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+    # 4.5.0+ includes spotDL PR #2626 (keyless Spotify client after the Feb 2026 API changes,
+    # issue #2617); 4.5.2 is the latest release with follow-up fixes.
+    "spotdl==4.5.2",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+musicdl = "musicdl.cli:main"
+
+[tool.setuptools]
+packages = ["musicdl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
