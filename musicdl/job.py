@@ -5,6 +5,7 @@ shared by the command line and the window. Progress is reported through
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -12,8 +13,18 @@ from typing import Callable, Dict, List, Optional, Tuple
 from spotdl.types.song import Song
 
 from musicdl.cache import MatchCache
-from musicdl.matching import MatchResult, default_provider_factory, find_matches
-from musicdl.pipeline import downloader_settings, prepare_for_download, split_existing, write_report
+from musicdl.matching import CANCELLED, MatchResult, default_provider_factory, find_matches
+from musicdl import network
+from musicdl.network import ConnectionGuard, looks_like_network_error
+from musicdl.pipeline import (
+    MIN_FILE_SIZE,
+    downloader_settings,
+    expected_path,
+    prepare_for_download,
+    remove_incomplete,
+    split_existing,
+    write_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +44,7 @@ class JobOptions:
     env_file: Optional[Path] = None
     # None = always search; read at creation so tests can redirect it
     cache_path: Optional[Path] = field(default_factory=lambda: DEFAULT_CACHE)
+    cancel: Optional[threading.Event] = None  # set it to stop after the current tracks
 
     @property
     def report(self) -> Path:
@@ -48,6 +60,8 @@ class JobEvents:
     matched: Callable[[MatchResult], None] = lambda match: None
     download_status: Callable[[str, str, int], None] = lambda key, status, percent: None
     phase: Callable[[str, int], None] = lambda name, count: None  # "search" | "download"
+    searching: Callable[[str, str], None] = lambda key, source: None  # song started on a source
+    connection: Callable[[bool], None] = lambda online: None  # internet lost (False) / back (True)
 
 
 @dataclass
@@ -58,17 +72,20 @@ class JobSummary:
     failed: List[Tuple[Song, str]] = field(default_factory=list)
     matches: List[MatchResult] = field(default_factory=list)
     report: Optional[Path] = None
+    cancelled: int = 0
 
     @property
     def succeeded(self) -> int:
-        return self.processed - len(self.failed)
+        return self.processed - len(self.failed) - self.cancelled
 
 
 class JobError(Exception):
     """User-facing error (bad input, missing file...)."""
 
 
-def load_songs(options: JobOptions, info: Callable[[str], None]) -> List[Song]:
+def load_songs(
+    options: JobOptions, info: Callable[[str], None], guard: Optional[ConnectionGuard] = None
+) -> List[Song]:
     if options.source_kind == "csv":
         from musicdl.csv_import import CsvFormatError, songs_from_csv
 
@@ -97,7 +114,7 @@ def load_songs(options: JobOptions, info: Callable[[str], None]) -> List[Song]:
         raise JobError(str(exc)) from exc
     info("Spotify: " + ("официальный API (ключи из .env)" if official else "без ключей"))
     info("Получаю список треков из Spotify… (большой плейлист — до минуты)")
-    songs = songs_from_url(options.source, options.threads)
+    songs = retry_on_network(lambda: songs_from_url(options.source, options.threads), guard)
     info(f"Из Spotify получено треков: {len(songs)}")
     return songs
 
@@ -138,6 +155,27 @@ def download_songs(
     return results
 
 
+def retry_on_network(action: Callable, guard: Optional[ConnectionGuard], attempts: int = 5):
+    """Run ``action``; if it fails because the connection dropped, wait until
+    it is back and try again."""
+    for attempt in range(attempts):
+        try:
+            return action()
+        except JobError:
+            raise
+        except Exception as exc:
+            if guard is None or attempt == attempts - 1 or not looks_like_network_error(exc):
+                raise
+            logger.warning("Network error, will retry: %s", exc)
+            if not guard.wait_until_online():
+                raise JobError("Остановлено") from exc
+    raise AssertionError("unreachable")
+
+
+def is_complete(path: Optional[Path]) -> bool:
+    return path is not None and Path(path).is_file() and Path(path).stat().st_size >= MIN_FILE_SIZE
+
+
 def search_threads(download_threads: int) -> int:
     """Searching is much lighter than downloading: use twice the parallelism (max 8)."""
     return max(1, min(8, download_threads * 2))
@@ -149,11 +187,14 @@ def run_job(
     provider_factory=default_provider_factory,
     downloader: Callable = download_songs,
     ffmpeg_check: Callable[[Callable[[str], None]], None] = ensure_ffmpeg,
+    online_check: Optional[Callable[[], bool]] = None,
+    download_retries: int = 2,
 ) -> JobSummary:
     events = events or JobEvents()
     summary = JobSummary()
+    guard = ConnectionGuard(events.connection, options.cancel, online_check or network.is_online)
 
-    songs = load_songs(options, events.info)
+    songs = load_songs(options, events.info, guard)
     if not songs:
         raise JobError("Во входных данных нет ни одного трека")
 
@@ -184,26 +225,60 @@ def run_job(
                 provider_factory,
                 options.only_verified,
                 on_result=events.matched,
+                on_try=lambda song, source: events.searching(song.url, source),
+                cancel=options.cancel,
+                guard=guard,
             )
         )
         summary.matches = [known[i] if i in known else next(searched) for i in range(len(todo))]
         for match in summary.matches:
             cache.put(match, options.only_verified)
         cache.save()
-    summary.failed = [(m.song, m.error or "not found") for m in summary.matches if not m.found]
+    summary.cancelled = sum(1 for m in summary.matches if m.error == CANCELLED)
+    summary.failed = [
+        (m.song, m.error or "not found") for m in summary.matches if not m.found and m.error != CANCELLED
+    ]
 
-    if not options.dry_run:
+    cancelled = options.cancel is not None and options.cancel.is_set()
+    if not options.dry_run and not cancelled:
         to_download = prepare_for_download(summary.matches)
         if to_download:
-            ffmpeg_check(events.info)
+            retry_on_network(lambda: ffmpeg_check(events.info), guard)
             events.info(f"Скачиваю {len(to_download)} трек(ов)…")
             events.phase("download", len(to_download))
-            for song, path in downloader(to_download, options, events.download_status):
-                if path is None or not Path(path).exists():
+
+            def run_downloader(songs: List[Song]) -> None:
+                try:
+                    for song, path in downloader(songs, options, events.download_status):
+                        results[song.url] = (song, path)
+                except Exception as exc:  # e.g. the connection dropped mid-run
+                    if not looks_like_network_error(exc):
+                        raise
+                    logger.warning("Download interrupted: %s", exc)
+
+            results: Dict[str, Tuple[Song, Optional[Path]]] = {song.url: (song, None) for song in to_download}
+            run_downloader(to_download)
+            # Failed downloads (lost connection, YouTube hiccups) get another
+            # chance once the connection is there.
+            for _ in range(download_retries):
+                retry = [song for song, path in results.values() if not is_complete(path)]
+                if not retry or (options.cancel is not None and options.cancel.is_set()):
+                    break
+                if not guard.wait_until_online():
+                    break
+                for song in retry:
+                    remove_incomplete(expected_path(song, options.out_dir))
+                    events.download_status(song.url, "Retry", 0)
+                events.info(f"Повторяю загрузку: {len(retry)} трек(ов)…")
+                run_downloader(retry)
+
+            for song, path in results.values():
+                if is_complete(path):
+                    events.download_status(song.url, "Done", 100)
+                else:
+                    remove_incomplete(expected_path(song, options.out_dir))
                     summary.failed.append((song, "download failed"))
                     events.download_status(song.url, "Error", 0)
-                else:
-                    events.download_status(song.url, "Done", 100)
 
     summary.report = write_report(options.report, summary.failed)
     return summary

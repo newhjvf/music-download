@@ -12,6 +12,9 @@ dependencies = [
     # issue #2617); 4.5.2 is the latest release with follow-up fixes.
     "spotdl==4.5.2",
     "python-dotenv>=1.0,<2",
+    # Windows 11 style theme for the window (MIT); the window falls back to
+    # the built-in theme if it is missing.
+    "sv-ttk>=2.6,<3",
 ]
 
 [project.optional-dependencies]

@@ -95,7 +95,14 @@ def options_from_args(args: argparse.Namespace) -> JobOptions:
 def run(args: argparse.Namespace, provider_factory: Callable = default_provider_factory, **job_kwargs) -> int:
     options = options_from_args(args)
     with console.status("Работаю…") as status:
-        events = JobEvents(info=lambda message: status.update(message))
+        events = JobEvents(
+            info=lambda message: status.update(message),
+            connection=lambda online: console.print(
+                "[green]Интернет снова есть — продолжаю.[/green]"
+                if online
+                else "[red]Нет интернета. Жду подключения — работа продолжится сама.[/red]"
+            ),
+        )
         try:
             summary = job_module.run_job(options, events, provider_factory, **job_kwargs)
         except JobError as exc:

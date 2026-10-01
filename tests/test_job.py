@@ -3,10 +3,11 @@ from pathlib import Path
 import pytest
 
 from musicdl.job import JobError, JobEvents, JobOptions, run_job
-from musicdl.pipeline import expected_path
+from musicdl.pipeline import MIN_FILE_SIZE, expected_path
 
 from .stubs import StubProvider, make_result
 
+FAKE_MP3 = b"ID3" + b"\0" * MIN_FILE_SIZE
 SAMPLE = Path(__file__).resolve().parent.parent / "examples" / "sample.csv"
 RESULTS = {
     "queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)],
@@ -24,7 +25,7 @@ def fake_download(songs, opts, on_status):
         on_status(song.url, "Downloading", 50)
         path = expected_path(song, opts.out_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"x")
+        path.write_bytes(FAKE_MP3)
         out.append((song, path))
     return out
 
@@ -145,3 +146,13 @@ def test_search_threads():
     from musicdl.job import search_threads
 
     assert [search_threads(n) for n in (1, 2, 4, 8)] == [2, 4, 8, 8]
+
+
+def test_cache_from_older_matching_rules_is_ignored(tmp_path):
+    import json
+
+    from musicdl.cache import VERSION, MatchCache
+
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({"version": VERSION - 1, "entries": {"x|all": {"url": "u", "time": 9e12}}}), encoding="utf-8")
+    assert MatchCache(path).entries == {}

@@ -6,11 +6,13 @@ from rich.console import Console
 
 import musicdl.cli as cli
 from musicdl.csv_import import TrackRow, row_to_song
-from musicdl.pipeline import expected_path, format_duration, split_existing, write_report
+from musicdl.pipeline import MIN_FILE_SIZE, expected_path, format_duration, split_existing, write_report
 from musicdl.spotify_input import SpotifyInputError, check_url, load_credentials
 
 from .stubs import StubProvider, make_result
 
+FAKE_MP3 = b"ID3" + b"\0" * MIN_FILE_SIZE
+OLD_MP3 = b"old" + b"\0" * MIN_FILE_SIZE
 SAMPLE = Path(__file__).resolve().parent.parent / "examples" / "sample.csv"
 
 RESULTS = {
@@ -35,7 +37,7 @@ def run_cli(argv, monkeypatch, downloads=None):
         for song in songs:
             path = expected_path(song, options.out_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(b"ID3")
+            path.write_bytes(FAKE_MP3)
             out.append((song, path))
         return out
 
@@ -78,12 +80,12 @@ def test_dry_run_table_and_report(tmp_path, monkeypatch, capsys):
 
 
 def test_download_skips_existing(tmp_path, monkeypatch):
-    (tmp_path / "Queen - Bohemian Rhapsody.mp3").write_bytes(b"old")
+    (tmp_path / "Queen - Bohemian Rhapsody.mp3").write_bytes(OLD_MP3)
     code, calls = run_cli(["csv", str(SAMPLE), "--out", str(tmp_path)], monkeypatch)
     assert code == 0
     downloaded = [s.name for s in calls[0]]
     assert downloaded == ["Smells Like Teen Spirit", "Кукушка"]
-    assert (tmp_path / "Queen - Bohemian Rhapsody.mp3").read_bytes() == b"old"
+    assert (tmp_path / "Queen - Bohemian Rhapsody.mp3").read_bytes() == OLD_MP3
     song = calls[0][0]
     assert song.download_url == "https://music.youtube.com/watch?v=teen"
     assert song.cover_url == "https://i.ytimg.com/vi/teen/hqdefault.jpg"
@@ -115,7 +117,7 @@ def test_write_report_removes_stale(tmp_path):
 def test_split_existing(tmp_path):
     a = row_to_song(TrackRow(line=2, title="A", artists=["X"]))
     b = row_to_song(TrackRow(line=3, title="B", artists=["X"]))
-    (tmp_path / "X - A.mp3").write_bytes(b"")
+    (tmp_path / "X - A.mp3").write_bytes(FAKE_MP3)
     assert split_existing([a, b], tmp_path) == ([b], [a])
 
 

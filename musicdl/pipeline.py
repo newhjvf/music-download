@@ -28,12 +28,32 @@ def expected_path(song: Song, out_dir: Path) -> Path:
     return create_file_name(song, output_template(out_dir), FORMAT)
 
 
+# A real mp3 track is never this small; anything below is a broken/partial
+# file (e.g. the program was closed or the connection dropped mid-way).
+MIN_FILE_SIZE = 64 * 1024
+
+
+def remove_incomplete(path: Path) -> bool:
+    """Delete ``path`` if it is a partial file. Returns True if removed."""
+    try:
+        if path.is_file() and path.stat().st_size < MIN_FILE_SIZE:
+            path.unlink()
+            logger.warning("Removed incomplete file %s", path)
+            return True
+    except OSError:
+        logger.warning("Could not remove incomplete file %s", path, exc_info=True)
+    return False
+
+
 def split_existing(songs: Iterable[Song], out_dir: Path) -> Tuple[List[Song], List[Song]]:
-    """-> (songs to process, songs already downloaded)."""
+    """-> (songs to process, songs already downloaded). Partial files left by
+    an interrupted run are deleted so the song is downloaded again."""
     todo: List[Song] = []
     existing: List[Song] = []
     for song in songs:
-        (existing if expected_path(song, out_dir).exists() else todo).append(song)
+        path = expected_path(song, out_dir)
+        remove_incomplete(path)
+        (existing if path.exists() else todo).append(song)
     return todo, existing
 
 

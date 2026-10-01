@@ -119,3 +119,29 @@ def test_update_splash_restarts_after_update(root, tmp_path, monkeypatch):
     monkeypatch.setattr(gui.subprocess, "Popen", lambda args, cwd=None: started.append((args, cwd)))
     assert gui.run_update_check(root) is True
     assert started and started[0][0][-1] == "--updated" and started[0][1] == str(tmp_path)
+
+
+def test_offline_banner_and_retry_row(root, tmp_path, monkeypatch):
+    app = gui.App(root, run_job=lambda *a, **k: None)
+    app._on_connection(False)
+    assert "Нет интернета" in app.status.get()
+    app._on_info("Ищу треки…")
+    assert "Нет интернета" in app.status.get()  # the warning stays visible
+    app._on_connection(True)
+    assert "снова есть" in app.status.get()
+
+    from musicdl.csv_import import TrackRow, row_to_song
+
+    song = row_to_song(TrackRow(line=2, title="A", artists=["X"]))
+    app.counters["missing"].set("0")
+    app.counters["done"].set("0")
+    app._on_songs([song], [])
+    app._on_phase("download", 1)
+    app._on_download(song.url, "Error", 0)
+    assert app.counters["missing"].get() == "1"
+    app._on_download(song.url, "Retry", 0)
+    assert app.counters["missing"].get() == "0"
+    app._on_download(song.url, "Done", 100)
+    item = app.rows[song.url]
+    assert app.table.set(item, "status") == "✔ скачано"
+    assert app.counters["done"].get() == "1"

@@ -29,6 +29,9 @@ from spotdl.types.result import Result
 from spotdl.types.song import Song
 from spotdl.utils.matching import order_results as _spotdl_order_results
 
+if False:  # typing only
+    from musicdl.network import ConnectionGuard
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +59,13 @@ def install_unknown_duration_patch() -> None:
 install_unknown_duration_patch()
 
 
-SOURCE_NAMES = {"YouTubeMusic": "YouTube Music", "YouTube": "YouTube", "SoundCloud": "SoundCloud"}
+CANCELLED = "cancelled"
+SOURCE_NAMES = {
+    "YouTubeMusic": "YouTube Music",
+    "YouTube": "YouTube",
+    "FastYouTube": "YouTube",
+    "SoundCloud": "SoundCloud",
+}
 
 
 @dataclass
@@ -69,6 +78,7 @@ class MatchResult:
     verified: bool = False
     error: Optional[str] = None
     source: str = ""  # "YouTube Music" / "YouTube" / "SoundCloud"
+    network_error: bool = False  # failed because the connection was (probably) lost
 
     @property
     def found(self) -> bool:
@@ -103,6 +113,63 @@ def query_variants(song: Song) -> List[Song]:
     return variants
 
 
+# Versions that are not the original track. A result containing one of these
+# is dropped unless the song title itself contains it (a real remix etc.).
+NOT_ORIGINAL = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"type\s*beat",
+        r"free\s*for\s*profit",
+        r"\bбит\b",
+        r"\bbeat\b",
+        r"\bинструментал\w*",
+        r"\binstrumental\b",
+        r"\bминус\b",
+        r"\bкараоке\b",
+        r"\bkaraoke\b",
+        r"\bкавер\b",
+        r"\bcover\b",
+        r"\blive\b",
+        r"\bлайв\b",
+        r"\bконцерт\w*",
+        r"\bconcert\b",
+        r"\bremix\b",
+        r"\bремикс\b",
+        r"\bmashup\b",
+        r"\bмэшап\b",
+        r"\bslowed\b",
+        r"\bsped\s*up\b",
+        r"\bspeed\s*up\b",
+        r"\bnightcore\b",
+        r"\breverb\b",
+        r"bass\s*boost",
+        r"\b8d\b",
+        r"\bacoustic\b",
+        r"\bакустик\w*",
+        r"\bdiss\b",
+        r"\bдисс\b",
+        r"\breaction\b",
+        r"\bреакци\w*",
+        r"\btutorial\b",
+        r"\bразбор\b",
+    )
+]
+
+
+def not_original_words(song: Song, result: Result) -> List[str]:
+    """Markers like 'type beat', 'кавер', 'live' found in the result title but
+    not in the song title."""
+    wanted = song.name or ""
+    got = result.name or ""
+    return [p.pattern for p in NOT_ORIGINAL if p.search(got) and not p.search(wanted)]
+
+
+def acceptable(song: Song, result: Result) -> bool:
+    """Result can be the original song: title matches and no 'not original'
+    markers (beats, covers, live, remixes, diss tracks...)."""
+    return title_matches(song, result) and not not_original_words(song, result)
+
+
 def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
     """Sanity check on top of spotDL's scoring: the result title must actually
     contain the song title (transliterated, so Cyrillic/Latin both work).
@@ -120,28 +187,31 @@ def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
 def _search_once(
     provider: AudioProvider, song: Song, only_verified: bool
 ) -> Tuple[Optional[str], Optional[Result]]:
-    """spotDL's ``provider.search`` plus the chosen ``Result``. View-count
-    lookups (an extra yt-dlp request spotDL uses as a tie-breaker) never fail
-    the search: YouTube often refuses them with "Sign in to confirm..."."""
+    """spotDL's ``provider.search`` plus the chosen ``Result``, without the
+    slow per-result view-count lookups."""
     seen: Dict[str, Result] = {}
     original_get_results = provider.get_results
-    original_get_views = provider.get_views
 
     def recording_get_results(search_term: str, *args, **kwargs) -> List[Result]:
         results = original_get_results(search_term, *args, **kwargs)
+        kept = []
         for result in results:
             seen.setdefault(result.url, result)
-        return results
+            if acceptable(song, result):
+                kept.append(result)
+            else:
+                logger.debug("Dropped %r for %s", result.name, song.display_name)
+        return kept
 
-    def safe_get_views(url: str) -> int:
-        try:
-            return original_get_views(url) or 0
-        except Exception as exc:
-            logger.debug("View count unavailable for %s: %s", url, exc)
-            return 0
+    def no_view_lookup(url: str) -> int:
+        # spotDL fetches the view count of up to 8 near-equal results with a
+        # full yt-dlp request each, only as a tie-breaker. That was most of
+        # the search time (and YouTube often refuses it), so results without
+        # a known view count simply count as 0 and keep their match score order.
+        return 0
 
     provider.get_results = recording_get_results  # type: ignore[method-assign]
-    provider.get_views = safe_get_views  # type: ignore[method-assign]
+    provider.get_views = no_view_lookup  # type: ignore[method-assign]
     try:
         url = provider.search(song, only_verified)
     finally:
@@ -154,6 +224,7 @@ def find_match(
     providers: Union[AudioProvider, Sequence[AudioProvider]],
     song: Song,
     only_verified: bool = False,
+    on_try: Optional[Callable[[str], None]] = None,
 ) -> MatchResult:
     """Try each provider (YouTube Music, then YouTube, then SoundCloud) and
     each title variant until a result passes spotDL's scoring and our title
@@ -161,21 +232,29 @@ def find_match(
     if isinstance(providers, AudioProvider):
         providers = [providers]
 
+    from musicdl.network import looks_like_network_error
+
     error: Optional[str] = None
+    network_error = False
+    answered = False  # at least one source searched without failing
     for provider in providers:
         source = SOURCE_NAMES.get(provider.name, provider.name)
+        if on_try:
+            on_try(source)
         for variant in query_variants(song):
             try:
                 url, result = _search_once(provider, variant, only_verified)
             except Exception as exc:  # network errors, YouTube blocks, API changes
                 logger.debug("%s search failed for %s: %s", source, song.display_name, exc, exc_info=True)
                 error = short_error(exc)
+                network_error = network_error or looks_like_network_error(exc)
                 break  # this provider is unusable for this song; try the next one
+            answered = True
             if not url:
                 continue
             if result is None:
                 return MatchResult(song=song, url=url, source=source)
-            if not title_matches(song, result):
+            if not acceptable(song, result):
                 logger.info("Rejected %s for %s: title %r", url, song.display_name, result.name)
                 continue
             return MatchResult(
@@ -187,7 +266,9 @@ def find_match(
                 verified=result.verified,
                 source=source,
             )
-    return MatchResult(song=song, error=error or "not found")
+    if answered and not network_error:
+        error = None  # a source searched fine and had nothing: plain "not found"
+    return MatchResult(song=song, error=error or "not found", network_error=network_error)
 
 
 class ProviderChain:
@@ -211,9 +292,45 @@ class ProviderChain:
                 yield provider
 
 
+def _fast_youtube_class():
+    from spotdl.providers.audio.youtube import YouTube
+    from yt_dlp import YoutubeDL
+
+    class FastYouTube(YouTube):
+        """spotDL's YouTube provider, but the search reads only the result
+        list (``extract_flat``) instead of opening all 10 videos: much faster,
+        and YouTube does not answer it with "Sign in to confirm you're not a bot"."""
+
+        def get_results(self, search_term: str, *_args, **_kwargs) -> List[Result]:
+            options = {**self.audio_handler.params, "skip_download": True, "extract_flat": "in_playlist"}
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(f"ytsearch10:{search_term}", download=False)
+            results = []
+            for entry in (info or {}).get("entries") or []:
+                if not entry or not entry.get("id"):
+                    continue
+                results.append(
+                    Result(
+                        source=self.name,
+                        url=f"https://www.youtube.com/watch?v={entry['id']}",
+                        verified=False,
+                        name=entry.get("title") or "",
+                        duration=entry.get("duration") or 0,
+                        author=entry.get("channel") or entry.get("uploader") or "",
+                        search_query=search_term,
+                        views=entry.get("view_count") or 0,
+                        result_id=entry["id"],
+                    )
+                )
+            return results
+
+    return FastYouTube
+
+
 def default_provider_factory(only_verified: bool = False) -> ProviderChain:
     from spotdl.providers.audio.soundcloud import SoundCloud
-    from spotdl.providers.audio.youtube import YouTube
+
+    YouTube = _fast_youtube_class()
 
     factories: List[Callable[[], AudioProvider]] = [lambda: YouTubeMusic(output_format="mp3")]
     if not only_verified:  # "official tracks only" = YouTube Music songs only
@@ -227,9 +344,15 @@ def find_matches(
     provider_factory: Callable[..., Any] = default_provider_factory,
     only_verified: bool = False,
     on_result: Optional[Callable[[MatchResult], None]] = None,
+    on_try: Optional[Callable[[Song, str], None]] = None,
+    cancel: Optional[threading.Event] = None,
+    guard: Optional["ConnectionGuard"] = None,
+    network_retries: int = 5,
 ) -> List[MatchResult]:
     """Search all songs in parallel (own providers per worker thread).
-    Results keep the input order."""
+    Results keep the input order. ``on_try(song, source)`` is called when a
+    source starts being searched for a song; once ``cancel`` is set the
+    remaining songs are returned with ``error="cancelled"``."""
     local = threading.local()
 
     def make_providers():
@@ -238,10 +361,23 @@ def find_matches(
         return provider_factory()
 
     def work(song: Song) -> MatchResult:
+        if cancel is not None and cancel.is_set():
+            return MatchResult(song=song, error=CANCELLED)
+        if guard is not None and guard.offline and not guard.wait_until_online():
+            return MatchResult(song=song, error=CANCELLED)
         providers = getattr(local, "providers", None)
         if providers is None:
             providers = local.providers = make_providers()
-        match = find_match(providers, song, only_verified)
+        tried = (lambda source: on_try(song, source)) if on_try else None
+        match = find_match(providers, song, only_verified, on_try=tried)
+        # Connection lost: wait until it is back and search this song again
+        # instead of reporting it as not found.
+        attempts = 0
+        while guard is not None and match.network_error and not match.found and attempts < network_retries:
+            attempts += 1
+            if not guard.wait_until_online():
+                return MatchResult(song=song, error=CANCELLED)
+            match = find_match(providers, song, only_verified, on_try=tried)
         if on_result:
             on_result(match)
         return match
