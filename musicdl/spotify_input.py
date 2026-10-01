@@ -8,6 +8,7 @@ used instead (Spotify requires Premium for Dev Mode apps since Feb 2026).
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 from pathlib import Path
@@ -64,9 +65,40 @@ def init_spotify(client_id: Optional[str], client_secret: Optional[str]) -> bool
     return official
 
 
+# Fields that make spotDL's Downloader re-query Spotify for every song
+# (``reinit_song``) when they are None. Playlist/album listings already carry
+# everything needed for matching and tagging except genre/publisher.
+_NEUTRAL_DEFAULTS = {
+    "genres": [],
+    "disc_number": 1,
+    "disc_count": 1,
+    "track_number": 1,
+    "tracks_count": 1,
+    "album_id": "",
+    "publisher": "",
+    "date": "",
+}
+
+
+def complete_song(song: Song) -> Song:
+    """Fill fields missing from a playlist/album listing with neutral values so
+    no extra per-track Spotify request is made."""
+    changes = {key: value for key, value in _NEUTRAL_DEFAULTS.items() if getattr(song, key) is None}
+    if song.album_artist is None:
+        changes["album_artist"] = song.artist
+    if song.disc_count is None and song.disc_number:
+        changes["disc_count"] = song.disc_number
+    return dataclasses.replace(song, **changes) if changes else song
+
+
 def songs_from_url(url: str, threads: int = 4) -> List[Song]:
-    """Resolve the link with spotDL (``parse_query``) after ``init_spotify``."""
-    from spotdl.utils.search import parse_query
+    """Resolve the link with spotDL after ``init_spotify``.
+
+    Uses ``get_simple_songs`` (one request per playlist/album page) instead of
+    ``parse_query``, which re-fetches every track separately and takes minutes
+    on large playlists.
+    """
+    from spotdl.utils.search import get_simple_songs
 
     check_url(url)
-    return parse_query([url.strip()], threads=max(1, threads))
+    return [complete_song(song) for song in get_simple_songs([url.strip()])]
