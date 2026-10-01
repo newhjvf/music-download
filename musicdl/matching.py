@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from spotdl.providers.audio import base as _provider_base
 from spotdl.providers.audio.base import AudioProvider
@@ -55,6 +56,9 @@ def install_unknown_duration_patch() -> None:
 install_unknown_duration_patch()
 
 
+SOURCE_NAMES = {"YouTubeMusic": "YouTube Music", "YouTube": "YouTube", "SoundCloud": "SoundCloud"}
+
+
 @dataclass
 class MatchResult:
     song: Song
@@ -64,6 +68,7 @@ class MatchResult:
     duration: float = 0.0  # seconds
     verified: bool = False
     error: Optional[str] = None
+    source: str = ""  # "YouTube Music" / "YouTube" / "SoundCloud"
 
     @property
     def found(self) -> bool:
@@ -77,66 +82,166 @@ def short_error(exc: BaseException, limit: int = 80) -> str:
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
-def find_match(provider: AudioProvider, song: Song, only_verified: bool = False) -> MatchResult:
-    """Run spotDL's search for one song and return the chosen result.
+_BRACKETS = re.compile(r"\s*[\(\[][^\)\]]*[\)\]]")
+_FEAT = re.compile(r"\s+(?:feat\.?|ft\.?|featuring|при уч\.?)\s+.*$", re.IGNORECASE)
+_DASH_SUFFIX = re.compile(r"\s+[-–—]\s+.*$")
 
-    ``provider`` must not be shared between threads (we wrap its
-    ``get_results`` for the duration of the call).
-    """
+
+def clean_title(title: str) -> str:
+    """'Song (feat. X) [Remastered] - Live' -> 'Song'."""
+    cleaned = _FEAT.sub("", _BRACKETS.sub("", title))
+    cleaned = _DASH_SUFFIX.sub("", cleaned).strip()
+    return cleaned or title.strip()
+
+
+def query_variants(song: Song) -> List[Song]:
+    """The song itself, then (if different) the song with a cleaned-up title."""
+    variants = [song]
+    cleaned = clean_title(song.name)
+    if cleaned.casefold() != song.name.strip().casefold():
+        variants.append(dataclasses.replace(song, name=cleaned))
+    return variants
+
+
+def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
+    """Sanity check on top of spotDL's scoring: the result title must actually
+    contain the song title (transliterated, so Cyrillic/Latin both work).
+    Guards against e.g. a lone ISRC hit that is a different song."""
+    from rapidfuzz import fuzz
+    from spotdl.utils.formatter import slugify
+
+    wanted = slugify(clean_title(song.name)).replace("-", " ")
+    got = slugify(result.name or "").replace("-", " ")
+    if not wanted or not got:
+        return True
+    return max(fuzz.partial_ratio(wanted, got), fuzz.token_set_ratio(wanted, got)) >= threshold
+
+
+def _search_once(
+    provider: AudioProvider, song: Song, only_verified: bool
+) -> Tuple[Optional[str], Optional[Result]]:
+    """spotDL's ``provider.search`` plus the chosen ``Result``. View-count
+    lookups (an extra yt-dlp request spotDL uses as a tie-breaker) never fail
+    the search: YouTube often refuses them with "Sign in to confirm..."."""
     seen: Dict[str, Result] = {}
-    original = provider.get_results
+    original_get_results = provider.get_results
+    original_get_views = provider.get_views
 
     def recording_get_results(search_term: str, *args, **kwargs) -> List[Result]:
-        results = original(search_term, *args, **kwargs)
+        results = original_get_results(search_term, *args, **kwargs)
         for result in results:
             seen.setdefault(result.url, result)
         return results
 
+    def safe_get_views(url: str) -> int:
+        try:
+            return original_get_views(url) or 0
+        except Exception as exc:
+            logger.debug("View count unavailable for %s: %s", url, exc)
+            return 0
+
     provider.get_results = recording_get_results  # type: ignore[method-assign]
+    provider.get_views = safe_get_views  # type: ignore[method-assign]
     try:
         url = provider.search(song, only_verified)
-    except Exception as exc:  # network errors, YouTube blocks, ytmusicapi changes
-        logger.debug("Search failed for %s: %s", song.display_name, exc, exc_info=True)
-        return MatchResult(song=song, error=short_error(exc))
     finally:
-        del provider.get_results  # restore the class method
-
-    if not url:
-        return MatchResult(song=song, error="not found")
-
-    result = seen.get(url)
-    if result is None:
-        return MatchResult(song=song, url=url)
-    return MatchResult(
-        song=song,
-        url=url,
-        title=result.name,
-        author=", ".join(result.artists) if result.artists else result.author,
-        duration=result.duration,
-        verified=result.verified,
-    )
+        del provider.get_results  # restore the class methods
+        del provider.get_views
+    return url, (seen.get(url) if url else None)
 
 
-def default_provider_factory() -> AudioProvider:
-    return YouTubeMusic(output_format="mp3")
+def find_match(
+    providers: Union[AudioProvider, Sequence[AudioProvider]],
+    song: Song,
+    only_verified: bool = False,
+) -> MatchResult:
+    """Try each provider (YouTube Music, then YouTube, then SoundCloud) and
+    each title variant until a result passes spotDL's scoring and our title
+    check. Providers must not be shared between threads."""
+    if isinstance(providers, AudioProvider):
+        providers = [providers]
+
+    error: Optional[str] = None
+    for provider in providers:
+        source = SOURCE_NAMES.get(provider.name, provider.name)
+        for variant in query_variants(song):
+            try:
+                url, result = _search_once(provider, variant, only_verified)
+            except Exception as exc:  # network errors, YouTube blocks, API changes
+                logger.debug("%s search failed for %s: %s", source, song.display_name, exc, exc_info=True)
+                error = short_error(exc)
+                break  # this provider is unusable for this song; try the next one
+            if not url:
+                continue
+            if result is None:
+                return MatchResult(song=song, url=url, source=source)
+            if not title_matches(song, result):
+                logger.info("Rejected %s for %s: title %r", url, song.display_name, result.name)
+                continue
+            return MatchResult(
+                song=song,
+                url=url,
+                title=result.name,
+                author=", ".join(result.artists) if result.artists else result.author,
+                duration=result.duration,
+                verified=result.verified,
+                source=source,
+            )
+    return MatchResult(song=song, error=error or "not found")
+
+
+class ProviderChain:
+    """Providers created on first use, so a source that cannot start (e.g.
+    SoundCloud unreachable) is skipped instead of breaking the search."""
+
+    def __init__(self, factories: Sequence[Callable[[], AudioProvider]]):
+        self._factories = list(factories)
+        self._created: Dict[int, Optional[AudioProvider]] = {}
+
+    def __iter__(self):
+        for index, factory in enumerate(self._factories):
+            if index not in self._created:
+                try:
+                    self._created[index] = factory()
+                except Exception as exc:
+                    logger.warning("Audio source unavailable: %s", short_error(exc))
+                    self._created[index] = None
+            provider = self._created[index]
+            if provider is not None:
+                yield provider
+
+
+def default_provider_factory(only_verified: bool = False) -> ProviderChain:
+    from spotdl.providers.audio.soundcloud import SoundCloud
+    from spotdl.providers.audio.youtube import YouTube
+
+    factories: List[Callable[[], AudioProvider]] = [lambda: YouTubeMusic(output_format="mp3")]
+    if not only_verified:  # "official tracks only" = YouTube Music songs only
+        factories += [lambda: YouTube(output_format="mp3"), lambda: SoundCloud(output_format="mp3")]
+    return ProviderChain(factories)
 
 
 def find_matches(
     songs: List[Song],
     threads: int = 4,
-    provider_factory: Callable[[], AudioProvider] = default_provider_factory,
+    provider_factory: Callable[..., Any] = default_provider_factory,
     only_verified: bool = False,
     on_result: Optional[Callable[[MatchResult], None]] = None,
 ) -> List[MatchResult]:
-    """Search all songs in parallel (one provider per worker thread).
+    """Search all songs in parallel (own providers per worker thread).
     Results keep the input order."""
     local = threading.local()
 
+    def make_providers():
+        if provider_factory is default_provider_factory:
+            return provider_factory(only_verified)
+        return provider_factory()
+
     def work(song: Song) -> MatchResult:
-        provider = getattr(local, "provider", None)
-        if provider is None:
-            provider = local.provider = provider_factory()
-        match = find_match(provider, song, only_verified)
+        providers = getattr(local, "providers", None)
+        if providers is None:
+            providers = local.providers = make_providers()
+        match = find_match(providers, song, only_verified)
         if on_result:
             on_result(match)
         return match

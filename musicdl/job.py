@@ -153,7 +153,7 @@ def run_job(
     events.info(f"Треков: {len(songs)}, уже скачано: {len(existing)}, к обработке: {len(todo)}")
 
     if todo:
-        events.info("Ищу на YouTube Music…")
+        events.info("Ищу треки (YouTube Music, YouTube, SoundCloud)…")
         events.phase("search", len(todo))
         summary.matches = find_matches(
             todo, options.threads, provider_factory, options.only_verified, on_result=events.matched
