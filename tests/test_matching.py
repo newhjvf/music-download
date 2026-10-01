@@ -86,3 +86,10 @@ def test_youtube_cover_url():
         "https://i.ytimg.com/vi/abc/hqdefault.jpg"
     )
     assert youtube_cover_url("https://example.com/") is None
+
+
+def test_short_error():
+    from musicdl.matching import short_error
+
+    assert short_error(ConnectionError("a\n b")) == "ConnectionError: a b"
+    assert len(short_error(ValueError("x" * 500))) < 100

@@ -70,6 +70,13 @@ class MatchResult:
         return self.url is not None
 
 
+def short_error(exc: BaseException, limit: int = 80) -> str:
+    text = " ".join(str(exc).split())
+    if len(text) > limit:
+        text = text[: limit - 1] + "…"
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 def find_match(provider: AudioProvider, song: Song, only_verified: bool = False) -> MatchResult:
     """Run spotDL's search for one song and return the chosen result.
 
@@ -90,7 +97,7 @@ def find_match(provider: AudioProvider, song: Song, only_verified: bool = False)
         url = provider.search(song, only_verified)
     except Exception as exc:  # network errors, YouTube blocks, ytmusicapi changes
         logger.debug("Search failed for %s: %s", song.display_name, exc, exc_info=True)
-        return MatchResult(song=song, error=f"{type(exc).__name__}: {exc}")
+        return MatchResult(song=song, error=short_error(exc))
     finally:
         del provider.get_results  # restore the class method
 
