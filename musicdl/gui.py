@@ -86,6 +86,7 @@ class App:
         self.worker: Optional[threading.Thread] = None
         self.rows: Dict[str, str] = {}  # song.url -> tree item
         self.links: Dict[str, str] = {}  # tree item -> YouTube URL
+        self.searched = self.search_total = 0
         self.report: Optional[Path] = None
 
         settings = load_settings()
@@ -365,6 +366,8 @@ class App:
 
         item = self.rows.get(match.song.url)
         self.progress.step(1)
+        self.searched += 1
+        self.status.set(f"Ищу на YouTube Music: {self.searched} из {self.search_total}…")
         if item is None:
             return
         if match.found:
@@ -400,8 +403,10 @@ class App:
         self.table.set(item, "status", text)
         self.table.item(item, tags=tags)
 
-    def _on_phase(self, _name: str, count: int) -> None:
+    def _on_phase(self, name: str, count: int) -> None:
         self.progress.configure(value=0, maximum=max(1, count))
+        if name == "search":
+            self.searched, self.search_total = 0, count
 
     def _on_done(self, summary, dry_run: bool) -> None:
         self._set_busy(False)

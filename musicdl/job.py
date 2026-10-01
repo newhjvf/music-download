@@ -91,8 +91,10 @@ def load_songs(options: JobOptions, info: Callable[[str], None]) -> List[Song]:
     except SpotifyInputError as exc:
         raise JobError(str(exc)) from exc
     info("Spotify: " + ("официальный API (ключи из .env)" if official else "без ключей"))
-    info("Получаю список треков из Spotify…")
-    return songs_from_url(options.source, options.threads)
+    info("Получаю список треков из Spotify… (большой плейлист — до минуты)")
+    songs = songs_from_url(options.source, options.threads)
+    info(f"Из Spotify получено треков: {len(songs)}")
+    return songs
 
 
 def ensure_ffmpeg(info: Callable[[str], None]) -> None:

@@ -165,3 +165,45 @@ def test_load_credentials(tmp_path, monkeypatch):
 
 def test_missing_csv_file(tmp_path):
     assert cli.main(["csv", str(tmp_path / "nope.csv")]) == 1
+
+
+def _listing_song():
+    from spotdl.types.song import Song
+
+    return Song.from_missing_data(
+        name="Track",
+        artists=["Artist"],
+        artist="Artist",
+        album_name="Album",
+        album_id="alb",
+        disc_number=1,
+        duration=200,
+        track_number=3,
+        tracks_count=10,
+        song_id="4u7EnebtmKWzUH433cf5Qv",
+        url="https://open.spotify.com/track/4u7EnebtmKWzUH433cf5Qv",
+        cover_url="https://i.scdn.co/image/x",
+    )
+
+
+def test_complete_song_avoids_spotdl_refetch():
+    from musicdl.spotify_input import complete_song
+
+    song = complete_song(_listing_song())
+    for field in ("genres", "disc_count", "tracks_count", "track_number", "album_id", "album_artist"):
+        assert getattr(song, field) is not None, field
+    assert (song.track_number, song.tracks_count, song.album_artist) == (3, 10, "Artist")
+    assert song.cover_url == "https://i.scdn.co/image/x" and song.duration == 200
+
+
+def test_songs_from_url_uses_single_listing_request(monkeypatch):
+    import spotdl.utils.search as search
+
+    from musicdl.spotify_input import songs_from_url
+
+    calls = []
+    monkeypatch.setattr(search, "get_simple_songs", lambda q: calls.append(q) or [_listing_song()])
+    monkeypatch.setattr(search, "reinit_song", lambda s: pytest.fail("per-track refetch"))
+    songs = songs_from_url("https://open.spotify.com/playlist/1FacUjfBAJd0HVjgVUTI9r?si=x")
+    assert calls == [["https://open.spotify.com/playlist/1FacUjfBAJd0HVjgVUTI9r?si=x"]]
+    assert songs[0].genres == []
