@@ -146,3 +146,13 @@ def test_search_threads():
     from musicdl.job import search_threads
 
     assert [search_threads(n) for n in (1, 2, 4, 8)] == [2, 4, 8, 8]
+
+
+def test_cache_from_older_matching_rules_is_ignored(tmp_path):
+    import json
+
+    from musicdl.cache import VERSION, MatchCache
+
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({"version": VERSION - 1, "entries": {"x|all": {"url": "u", "time": 9e12}}}), encoding="utf-8")
+    assert MatchCache(path).entries == {}
