@@ -14,3 +14,7 @@ dist/
 # Downloads / reports
 music/
 not_found.csv
+
+# Self-update state
+.musicdl-version.json
+.update-*/

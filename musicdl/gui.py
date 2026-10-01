@@ -491,15 +491,61 @@ def _enable_hidpi() -> None:
             pass
 
 
-def main() -> int:
+def run_update_check(root: tk.Tk) -> bool:
+    """Small "checking for updates" screen. Returns True if the program was
+    updated and a fresh copy has been started (this one should exit)."""
+    from musicdl import updater
+
+    if updater.install_root() is None:
+        return False
+
+    message = tk.StringVar(value="Проверяю обновления…")
+    frame = ttk.Frame(root, padding=30)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, textvariable=message).pack()
+    bar = ttk.Progressbar(frame, mode="indeterminate", length=260)
+    bar.pack(pady=10)
+    bar.start(15)
+
+    result: Dict[str, bool] = {}
+
+    def work() -> None:
+        try:
+            result["updated"] = updater.check_and_update(lambda text: root.after(0, message.set, text))
+        except Exception:  # never block the program because of the updater
+            logging.getLogger("musicdl").exception("Updater crashed")
+            result["updated"] = False
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        root.update()
+        thread.join(0.05)
+    bar.stop()
+    frame.destroy()
+
+    if result.get("updated"):
+        subprocess.Popen([sys.executable, "-m", "musicdl.gui", "--updated"], cwd=str(updater.install_root()))
+        return True
+    return False
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     _setup_io()
     _enable_hidpi()
     root = tk.Tk()
+    root.title("musicdl")
     try:
         ttk.Style(root).theme_use("vista" if sys.platform == "win32" else "clam")
     except tk.TclError:
         pass
-    App(root)
+    if "--updated" not in argv and "--no-update" not in argv and run_update_check(root):
+        root.destroy()
+        return 0
+    app = App(root)
+    if "--updated" in argv:
+        app.status.set("Программа обновлена до последней версии. " + app.status.get())
     root.mainloop()
     return 0
 
