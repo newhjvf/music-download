@@ -1,0 +1,95 @@
+from pathlib import Path
+
+import pytest
+
+from musicdl.job import JobError, JobEvents, JobOptions, run_job
+from musicdl.pipeline import expected_path
+
+from .stubs import StubProvider, make_result
+
+SAMPLE = Path(__file__).resolve().parent.parent / "examples" / "sample.csv"
+RESULTS = {
+    "queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)],
+    "nirvana - smells like teen spirit": [make_result("teen", "Smells Like Teen Spirit", ["Nirvana"], 301)],
+}
+
+
+def options(tmp_path, **kw):
+    return JobOptions(source_kind="csv", source=str(SAMPLE), out_dir=tmp_path, threads=2, **kw)
+
+
+def fake_download(songs, opts, on_status):
+    out = []
+    for song in songs:
+        on_status(song.url, "Downloading", 50)
+        path = expected_path(song, opts.out_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        out.append((song, path))
+    return out
+
+
+def test_events_and_summary(tmp_path):
+    log = []
+    events = JobEvents(
+        info=lambda m: log.append(("info", m)),
+        songs_loaded=lambda todo, existing: log.append(("songs", len(todo), len(existing))),
+        matched=lambda m: log.append(("match", m.song.name, m.found)),
+        download_status=lambda key, status, pct: log.append(("dl", status)),
+        phase=lambda name, count: log.append(("phase", name, count)),
+    )
+    ffmpeg_calls = []
+    summary = run_job(
+        options(tmp_path),
+        events,
+        provider_factory=lambda: StubProvider(RESULTS),
+        downloader=fake_download,
+        ffmpeg_check=ffmpeg_calls.append,
+    )
+    assert (summary.total, summary.existing, summary.processed, summary.succeeded) == (4, 0, 4, 2)
+    assert ("songs", 4, 0) in log
+    assert ("phase", "search", 4) in log and ("phase", "download", 2) in log
+    assert sum(1 for e in log if e[0] == "match") == 4
+    assert log.count(("dl", "Done")) == 2
+    assert len(ffmpeg_calls) == 1
+    assert summary.report == tmp_path / "not_found.csv"
+
+
+def test_dry_run_never_downloads_or_needs_ffmpeg(tmp_path):
+    def boom(*a, **k):
+        raise AssertionError("must not be called")
+
+    summary = run_job(
+        options(tmp_path, dry_run=True),
+        provider_factory=lambda: StubProvider(RESULTS),
+        downloader=boom,
+        ffmpeg_check=boom,
+    )
+    assert summary.succeeded == 2
+
+
+def test_nothing_found_skips_ffmpeg(tmp_path):
+    summary = run_job(
+        options(tmp_path),
+        provider_factory=lambda: StubProvider({}),
+        downloader=fake_download,
+        ffmpeg_check=lambda info: (_ for _ in ()).throw(AssertionError("no ffmpeg needed")),
+    )
+    assert summary.succeeded == 0 and len(summary.failed) == 4
+
+
+def test_missing_file_is_user_error(tmp_path):
+    with pytest.raises(JobError, match="не найден"):
+        run_job(JobOptions(source_kind="csv", source=str(tmp_path / "x.csv"), out_dir=tmp_path))
+
+
+def test_bad_csv_is_user_error(tmp_path):
+    bad = tmp_path / "bad.csv"
+    bad.write_text("foo,bar\n1,2\n", encoding="utf-8")
+    with pytest.raises(JobError, match="Track name|title"):
+        run_job(JobOptions(source_kind="csv", source=str(bad), out_dir=tmp_path))
+
+
+def test_bad_spotify_link_is_user_error(tmp_path):
+    with pytest.raises(JobError):
+        run_job(JobOptions(source_kind="url", source="https://example.com", out_dir=tmp_path))
