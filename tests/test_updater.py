@@ -36,7 +36,7 @@ class FakeGitHub:
         if self.offline:
             raise OSError("no internet")
         if url == updater.API_URL:
-            return json.dumps({"sha": self.sha}).encode()
+            return json.dumps({"sha": self.sha, "commit": {"committer": {"date": "2026-10-01T11:05:59Z"}}}).encode()
         assert url.endswith(self.sha)
         return make_zip(self.sha, self.files)
 
@@ -115,3 +115,15 @@ def test_offline_or_broken_archive_changes_nothing(tmp_path):
 
 def test_not_updating_dev_checkout(tmp_path):
     assert updater.check_and_update(fetch=lambda *a: (_ for _ in ()).throw(AssertionError()), root=None) in (False,)
+
+
+def test_version_label_and_pycache_kept(tmp_path):
+    root = installed(tmp_path)
+    cache = root / "musicdl" / "__pycache__"
+    cache.mkdir()
+    (cache / "x.pyc").write_bytes(b"pyc")
+    assert updater.version_label(root) == "версия не определена"
+    assert updater.check_and_update(fetch=FakeGitHub(SHA1, release("1")), root=root) is True
+    assert updater.version_label(root) == "версия от 01.10.2026 11:05 UTC"
+    assert (cache / "x.pyc").exists()  # never touched (may be in use)
+    assert not list(root.rglob("*.new"))

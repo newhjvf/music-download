@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, List, Optional
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from musicdl import __version__
 
 APP_DIR = Path.home() / ".musicdl"
 SETTINGS_FILE = APP_DIR / "settings.json"
@@ -107,7 +106,9 @@ class App:
         self.only_verified = tk.BooleanVar(value=bool(settings.get("only_verified", False)))
         self.status = tk.StringVar(value="Выберите CSV-файл или вставьте ссылку Spotify, затем нажмите «Скачать».")
 
-        root.title(f"musicdl {__version__} — скачивание музыки")
+        from musicdl.updater import version_label
+
+        root.title(f"musicdl — скачивание музыки ({version_label()})")
         root.minsize(760, 520)
         root.geometry("980x640")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
