@@ -27,22 +27,26 @@ def stub_factory():
 
 def run_cli(argv, monkeypatch, downloads=None):
     monkeypatch.setattr(cli, "console", Console(width=250))
-    monkeypatch.setattr(cli, "default_provider_factory", stub_factory)
     calls = []
 
-    def fake_download(songs, out_dir, threads, bitrate):
+    def fake_download(songs, options, on_status):
         calls.append(songs)
         out = []
         for song in songs:
-            path = expected_path(song, out_dir)
+            path = expected_path(song, options.out_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"ID3")
             out.append((song, path))
         return out
 
-    monkeypatch.setattr(cli, "download", downloads or fake_download)
     args = cli.build_parser().parse_args(argv)
-    return cli.run(args, provider_factory=stub_factory), calls
+    code = cli.run(
+        args,
+        provider_factory=stub_factory,
+        downloader=downloads or fake_download,
+        ffmpeg_check=lambda info: None,
+    )
+    return code, calls
 
 
 def read_report(path):
@@ -87,7 +91,7 @@ def test_download_skips_existing(tmp_path, monkeypatch):
 
     # second run: everything found is already there, nothing new downloaded
     code, calls = run_cli(["csv", str(SAMPLE), "--out", str(tmp_path)], monkeypatch)
-    assert calls == [[]]
+    assert calls == []
 
 
 def test_failed_download_goes_to_report(tmp_path, monkeypatch):
@@ -160,5 +164,4 @@ def test_load_credentials(tmp_path, monkeypatch):
 
 
 def test_missing_csv_file(tmp_path):
-    with pytest.raises(SystemExit):
-        cli.main(["csv", str(tmp_path / "nope.csv")])
+    assert cli.main(["csv", str(tmp_path / "nope.csv")]) == 1

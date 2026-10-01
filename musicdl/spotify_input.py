@@ -51,6 +51,9 @@ def init_spotify(client_id: Optional[str], client_secret: Optional[str]) -> bool
     from spotdl.utils.config import DEFAULT_CONFIG
     from spotdl.utils.spotify import SpotifyClient
 
+    if SpotifyClient._instance is not None:  # second run in the same window
+        return SpotifyClient.is_using_official_api()
+
     official = bool(client_id and client_secret)
     SpotifyClient.init(
         client_id=client_id or DEFAULT_CONFIG["client_id"],

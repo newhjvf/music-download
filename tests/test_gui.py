@@ -1,0 +1,81 @@
+import functools
+import os
+import time
+
+import pytest
+
+tk = pytest.importorskip("tkinter")
+
+from musicdl import gui, job  # noqa: E402
+
+from .stubs import StubProvider, make_result  # noqa: E402
+from .test_job import SAMPLE, fake_download  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "message,percent,text",
+    [("Downloading", 40, "загрузка 40%"), ("Done", 100, "✔ скачано"), ("Error", 0, "✖ ошибка загрузки"), ("Other", 0, "Other")],
+)
+def test_human_status(message, percent, text):
+    assert gui.human_status(message, percent) == text
+
+
+@pytest.fixture
+def root(tmp_path, monkeypatch):
+    if os.name != "nt" and not os.environ.get("DISPLAY"):
+        pytest.skip("no display")
+    monkeypatch.setattr(gui, "SETTINGS_FILE", tmp_path / "settings.json")
+    errors = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, msg: errors.append(msg))
+    try:
+        window = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    window.withdraw()
+    yield window
+    window.destroy()
+    assert not errors, errors
+
+
+def wait(app, root, timeout=10):
+    end = time.time() + timeout
+    while app.worker and app.worker.is_alive() and time.time() < end:
+        root.update()
+        time.sleep(0.02)
+    for _ in range(20):
+        root.update()
+        time.sleep(0.02)
+
+
+def test_window_download_flow(root, tmp_path, monkeypatch):
+    results = {"queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)]}
+    run = functools.partial(
+        job.run_job, provider_factory=lambda: StubProvider(results), downloader=fake_download, ffmpeg_check=lambda i: None
+    )
+    monkeypatch.setattr(gui.messagebox, "showwarning", lambda *a, **k: None)
+    app = gui.App(root, run_job=run)
+    app.csv_path.set(str(SAMPLE))
+    app.out_dir.set(str(tmp_path / "music"))
+    app.start(dry_run=False)
+    wait(app, root)
+
+    statuses = [app.table.set(item, "status") for item in app.table.get_children()]
+    assert statuses == ["✔ скачано", "✖ не найдено", "✖ не найдено", "✖ не найдено"]
+    assert (tmp_path / "music" / "Queen - Bohemian Rhapsody.mp3").exists()
+    assert "скачано 1 из 4" in app.status.get()
+    assert str(app.report_button.cget("state")) == "normal"
+    assert (tmp_path / "settings.json").exists()
+
+
+def test_validation_messages(root, monkeypatch):
+    shown = []
+    monkeypatch.setattr(gui.messagebox, "showwarning", lambda title, msg: shown.append(msg))
+    app = gui.App(root, run_job=lambda *a, **k: None)
+    app.mode.set("csv")
+    app.csv_path.set("")
+    app.start(dry_run=True)
+    app.mode.set("url")
+    app.link.set("https://example.com")
+    app.start(dry_run=True)
+    assert "CSV" in shown[0] and "Spotify" in shown[1]
+    assert app.worker is None

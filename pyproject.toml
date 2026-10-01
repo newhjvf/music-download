@@ -20,6 +20,9 @@ dev = ["pytest>=8"]
 [project.scripts]
 musicdl = "musicdl.cli:main"
 
+[project.gui-scripts]
+musicdl-gui = "musicdl.gui:main"
+
 [tool.setuptools]
 packages = ["musicdl"]
 

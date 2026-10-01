@@ -6,21 +6,16 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence
 
 from rich.console import Console
 from rich.table import Table
 
 from musicdl import __version__
-from musicdl.matching import MatchResult, default_provider_factory, find_matches
-from musicdl.pipeline import (
-    download,
-    expected_path,
-    format_duration,
-    prepare_for_download,
-    split_existing,
-    write_report,
-)
+from musicdl import job as job_module
+from musicdl.job import JobError, JobEvents, JobOptions
+from musicdl.matching import MatchResult, default_provider_factory
+from musicdl.pipeline import format_duration
 
 console = Console()
 
@@ -62,24 +57,6 @@ def setup_logging(verbose: bool) -> None:
             logging.getLogger(name).setLevel(logging.ERROR)
 
 
-def load_songs(args: argparse.Namespace):
-    if args.mode == "csv":
-        from musicdl.csv_import import songs_from_csv
-
-        if not args.file.is_file():
-            raise SystemExit(f"Файл не найден: {args.file}")
-        return songs_from_csv(args.file)
-
-    from musicdl.spotify_input import check_url, init_spotify, load_credentials, songs_from_url
-
-    check_url(args.link)
-    official = init_spotify(*load_credentials(args.env))
-    console.print(
-        "Spotify: " + ("официальный API (ключи из .env)" if official else "без ключей (spotDL / SpotipyFree)")
-    )
-    return songs_from_url(args.link, args.threads)
-
-
 def match_table(matches: List[MatchResult]) -> Table:
     table = Table(title="Сопоставление", show_lines=False)
     table.add_column("#", justify="right")
@@ -99,36 +76,39 @@ def match_table(matches: List[MatchResult]) -> Table:
     return table
 
 
-def run(args: argparse.Namespace, provider_factory: Callable = default_provider_factory) -> int:
-    songs = load_songs(args)
-    if not songs:
-        console.print("[yellow]Треков не найдено во входных данных.[/yellow]")
-        return 1
+def options_from_args(args: argparse.Namespace) -> JobOptions:
+    return JobOptions(
+        source_kind=args.mode,
+        source=str(args.file) if args.mode == "csv" else args.link,
+        out_dir=args.out,
+        threads=args.threads,
+        bitrate=args.bitrate,
+        dry_run=args.dry_run,
+        only_verified=args.only_verified,
+        report_path=args.report,
+        env_file=getattr(args, "env", None),
+    )
 
-    out_dir: Path = args.out
-    report_path: Path = args.report or out_dir / "not_found.csv"
-    todo, existing = split_existing(songs, out_dir)
-    console.print(f"Треков: {len(songs)}, уже скачано: {len(existing)}, к обработке: {len(todo)}")
 
-    with console.status("Поиск на YouTube Music…"):
-        matches = find_matches(todo, args.threads, provider_factory, args.only_verified)
+def run(args: argparse.Namespace, provider_factory: Callable = default_provider_factory, **job_kwargs) -> int:
+    options = options_from_args(args)
+    with console.status("Работаю…") as status:
+        events = JobEvents(info=lambda message: status.update(message))
+        try:
+            summary = job_module.run_job(options, events, provider_factory, **job_kwargs)
+        except JobError as exc:
+            console.print(f"[red]{exc}[/red]")
+            return 1
 
-    failed: List[Tuple] = [(m.song, m.error or "not found") for m in matches if not m.found]
-
-    if args.dry_run:
-        console.print(match_table(matches))
-    else:
-        results = download(prepare_for_download(matches), out_dir, args.threads, args.bitrate)
-        for song, path in results:
-            if path is None or not Path(path).exists():
-                failed.append((song, "download failed"))
-
-    report = write_report(report_path, failed)
-    found = len(todo) - len(failed)
-    verb = "найдено" if args.dry_run else "скачано"
-    console.print(f"Готово: {verb} {found} из {len(todo)}, пропущено (уже есть): {len(existing)}.")
-    if report:
-        console.print(f"[yellow]Не удалось: {len(failed)} — список в {report}[/yellow]")
+    console.print(f"Треков: {summary.total}, уже скачано: {summary.existing}, обработано: {summary.processed}")
+    if options.dry_run:
+        console.print(match_table(summary.matches))
+    verb = "найдено" if options.dry_run else "скачано"
+    console.print(
+        f"Готово: {verb} {summary.succeeded} из {summary.processed}, пропущено (уже есть): {summary.existing}."
+    )
+    if summary.report:
+        console.print(f"[yellow]Не удалось: {len(summary.failed)} — список в {summary.report}[/yellow]")
     return 0
 
 
@@ -157,4 +137,4 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
 
 
-__all__ = ["main", "run", "build_parser", "expected_path"]
+__all__ = ["main", "run", "build_parser"]
