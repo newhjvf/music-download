@@ -300,7 +300,7 @@ def run_job(
         if known:
             events.info(f"Уже найдены раньше: {len(known)}, ищу остальные: {len(to_search)}…")
         else:
-            events.info("Ищу треки (YouTube Music, YouTube, SoundCloud)…")
+            events.info("Ищу треки (YouTube Music, Bandcamp, SoundCloud, YouTube)…")
 
         searched = iter(
             find_matches(

@@ -65,6 +65,7 @@ SOURCE_NAMES = {
     "YouTube": "YouTube",
     "FastYouTube": "YouTube",
     "SoundCloud": "SoundCloud",
+    "Bandcamp": "Bandcamp",
 }
 
 
@@ -392,7 +393,7 @@ def find_match(
     on_try: Optional[Callable[[str], None]] = None,
     describe: Optional[Describe] = None,
 ) -> MatchResult:
-    """Look in every source (YouTube Music, YouTube, SoundCloud), stopping at
+    """Look in every source (YouTube Music, Bandcamp, SoundCloud, YouTube), stopping at
     the first one that has an official upload, and pick the best candidate:
     official uploads first, then re-uploads that pass the music/length checks
     (``only_verified`` = official uploads only). Providers must not be shared
@@ -522,6 +523,8 @@ def _fast_youtube_class():
 def default_provider_factory(only_verified: bool = False) -> ProviderChain:
     from spotdl.providers.audio.soundcloud import SoundCloud
 
+    from musicdl.bandcamp import Bandcamp
+
     YouTube = _fast_youtube_class()
 
     # "Official tracks only" still searches every source: an artist's own
@@ -529,8 +532,9 @@ def default_provider_factory(only_verified: bool = False) -> ProviderChain:
     return ProviderChain(
         [
             lambda: YouTubeMusic(output_format="mp3"),
-            lambda: YouTube(output_format="mp3"),
+            lambda: Bandcamp(output_format="mp3"),  # artists' own pages
             lambda: SoundCloud(output_format="mp3"),
+            lambda: YouTube(output_format="mp3"),
         ]
     )
 
