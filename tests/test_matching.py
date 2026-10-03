@@ -301,3 +301,13 @@ def test_fast_youtube_reads_only_the_result_list(monkeypatch):
         ("https://www.youtube.com/watch?v=abc", "Song", "Artist", 200)
     ]
     assert SOURCE_NAMES[provider.name] == "YouTube"
+
+
+def test_censored_version_is_used_only_when_nothing_else_exists():
+    censored = make_result("clean", "Smells Like Teen Spirit (песни без мата)", ["Nirvana"], 301)
+    # only the censored upload exists: better than "not found"
+    assert find_match(StubProvider({QUERY: [censored]}), song()).url == censored.url
+    # an uncensored one exists too: it wins even if it ranks lower
+    other = make_result("plain", "Smells Like Teen Spirit", ["Nirvana"], 301, album="Nevermind")
+    match = find_match(StubProvider({QUERY: [censored, other]}), song())
+    assert match.url == other.url
