@@ -236,8 +236,40 @@ def test_original_preferred_over_better_ranked_beat():
 
 def test_plain_not_found_after_a_source_error():
     failing = StubProvider({}, fail=RuntimeError("Sign in to confirm you're not a bot"))
-    match = find_match([failing, SecondSource({})], song())
+    match = find_match([failing, SecondSource({QUERY: [WRONG_TITLE]})], song())
     assert match.error == "not found"
+
+
+def test_source_without_any_results_is_an_error_not_not_found():
+    # A real song always gets some hits; an empty answer means blocked/throttled.
+    match = find_match(StubProvider({}), song())
+    assert not match.found
+    assert match.error != "not found"
+    assert "пустой ответ" in match.error and not match.network_error
+
+
+def test_no_usable_source_is_an_error_not_not_found():
+    def broken():
+        raise OSError("tunnel failed")
+
+    match = find_match(ProviderChain([broken]), song())
+    assert not match.found
+    assert match.error != "not found"
+    assert "tunnel failed" in match.error
+
+
+def test_provider_chain_retries_a_source_that_failed_to_start():
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise OSError("temporarily unreachable")
+        return StubProvider({})
+
+    chain = ProviderChain([flaky])
+    assert list(chain) == []
+    assert len(list(chain)) == 1
 
 
 def test_fast_youtube_reads_only_the_result_list(monkeypatch):

@@ -19,7 +19,9 @@ RESULTS = {
     "queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)],
     "nirvana - smells like teen spirit": [make_result("teen", "Smells Like Teen Spirit", ["Nirvana"], 301)],
     "кино - кукушка": [make_result("kuku", "Кукушка", ["Кино"], 400, verified=False)],
-    # "Under Pressure" -> nothing found
+    # "Under Pressure" -> only an unrelated song: not found
+    "queen, david bowie - under pressure": [make_result("other", "Another One Bites the Dust", ["Queen"], 215)],
+    "queen - under pressure": [make_result("other", "Another One Bites the Dust", ["Queen"], 215)],
 }
 
 

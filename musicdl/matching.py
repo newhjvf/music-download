@@ -186,10 +186,12 @@ def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
 
 def _search_once(
     provider: AudioProvider, song: Song, only_verified: bool
-) -> Tuple[Optional[str], Optional[Result]]:
-    """spotDL's ``provider.search`` plus the chosen ``Result``, without the
-    slow per-result view-count lookups."""
+) -> Tuple[Optional[str], Optional[Result], int]:
+    """spotDL's ``provider.search`` plus the chosen ``Result`` and the number
+    of raw results the source returned, without the slow per-result
+    view-count lookups."""
     seen: Dict[str, Result] = {}
+    dropped: List[str] = []
     original_get_results = provider.get_results
 
     def recording_get_results(search_term: str, *args, **kwargs) -> List[Result]:
@@ -200,7 +202,7 @@ def _search_once(
             if acceptable(song, result):
                 kept.append(result)
             else:
-                logger.debug("Dropped %r for %s", result.name, song.display_name)
+                dropped.append(result.name)
         return kept
 
     def no_view_lookup(url: str) -> int:
@@ -217,7 +219,18 @@ def _search_once(
     finally:
         del provider.get_results  # restore the class methods
         del provider.get_views
-    return url, (seen.get(url) if url else None)
+    if not url:
+        # One line per failed search: tells "source gave nothing" (blocked)
+        # from "gave results that were all rejected" (matching rules).
+        logger.info(
+            "%s: no match for %s: %d results, %d rejected %s",
+            provider.name,
+            song.display_name,
+            len(seen),
+            len(dropped),
+            dropped[:3],
+        )
+    return url, (seen.get(url) if url else None), len(seen)
 
 
 def find_match(
@@ -236,20 +249,26 @@ def find_match(
 
     error: Optional[str] = None
     network_error = False
-    answered = False  # at least one source searched without failing
+    answered = False  # at least one source returned real search results
+    used_any = False  # at least one source could be started
+    silent: Optional[str] = None  # a source that answered without a single result
     for provider in providers:
+        used_any = True
         source = SOURCE_NAMES.get(provider.name, provider.name)
         if on_try:
             on_try(source)
+        raw_results = 0
         for variant in query_variants(song):
             try:
-                url, result = _search_once(provider, variant, only_verified)
+                url, result, raw = _search_once(provider, variant, only_verified)
             except Exception as exc:  # network errors, YouTube blocks, API changes
                 logger.debug("%s search failed for %s: %s", source, song.display_name, exc, exc_info=True)
                 error = short_error(exc)
                 network_error = network_error or looks_like_network_error(exc)
                 break  # this provider is unusable for this song; try the next one
-            answered = True
+            raw_results += raw
+            if raw:
+                answered = True
             if not url:
                 continue
             if result is None:
@@ -266,8 +285,20 @@ def find_match(
                 verified=result.verified,
                 source=source,
             )
-    if answered and not network_error:
+        else:
+            if not raw_results:
+                # A real song always gets some hits; none at all means the
+                # source is blocking or throttling us, not "track not found".
+                silent = source
+    if not used_any:
+        failure = getattr(providers, "last_error", None)
+        if failure is not None:
+            error = "Источники поиска недоступны: " + short_error(failure)
+            network_error = looks_like_network_error(failure)
+    elif answered and not network_error:
         error = None  # a source searched fine and had nothing: plain "not found"
+    elif silent and not error and not network_error:
+        error = f"{silent}: пустой ответ (возможно, блокировка)"
     return MatchResult(song=song, error=error or "not found", network_error=network_error)
 
 
@@ -277,19 +308,22 @@ class ProviderChain:
 
     def __init__(self, factories: Sequence[Callable[[], AudioProvider]]):
         self._factories = list(factories)
-        self._created: Dict[int, Optional[AudioProvider]] = {}
+        self._created: Dict[int, AudioProvider] = {}
+        self.last_error: Optional[BaseException] = None  # why the latest source failed to start
 
     def __iter__(self):
+        self.last_error = None
         for index, factory in enumerate(self._factories):
             if index not in self._created:
                 try:
                     self._created[index] = factory()
                 except Exception as exc:
+                    # Not remembered: the next song tries to start it again, so a
+                    # source that was only briefly unreachable comes back.
                     logger.warning("Audio source unavailable: %s", short_error(exc))
-                    self._created[index] = None
-            provider = self._created[index]
-            if provider is not None:
-                yield provider
+                    self.last_error = exc
+                    continue
+            yield self._created[index]
 
 
 def _fast_youtube_class():
