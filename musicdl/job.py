@@ -134,6 +134,40 @@ def ensure_ffmpeg(info: Callable[[str], None]) -> None:
         raise JobError("ffmpeg не установлен. Выполните: spotdl --download-ffmpeg")
 
 
+def ensure_deno() -> None:
+    """yt-dlp needs a JavaScript runtime (Deno) for some YouTube downloads;
+    fetch spotDL's local copy once. Best effort: never stops the download."""
+    try:
+        from spotdl.utils.deno import download_deno, is_deno_installed
+
+        if not is_deno_installed():
+            logger.info("Deno not found, downloading")
+            download_deno()
+    except Exception as exc:
+        logger.warning("Could not get Deno: %s", exc)
+
+
+def log_download_causes() -> None:
+    """spotDL reports a failed download only as "YT-DLP download error - <url>";
+    also write the real reason to the log. Idempotent."""
+    from spotdl.providers.audio.base import AudioProvider
+    from musicdl.matching import short_error
+
+    original = AudioProvider.get_download_metadata
+    if getattr(original, "_musicdl_logs_cause", False):
+        return
+
+    def get_download_metadata(self, url, download=False):
+        try:
+            return original(self, url, download)
+        except Exception as exc:
+            logger.warning("Download of %s failed: %s", url, short_error(exc.__cause__ or exc, 200))
+            raise
+
+    get_download_metadata._musicdl_logs_cause = True  # type: ignore[attr-defined]
+    AudioProvider.get_download_metadata = get_download_metadata  # type: ignore[method-assign]
+
+
 def download_songs(
     songs: List[Song],
     options: JobOptions,
@@ -145,7 +179,11 @@ def download_songs(
     if not songs:
         return []
     Path(options.out_dir).mkdir(parents=True, exist_ok=True)
-    downloader = Downloader(downloader_settings(options.out_dir, options.threads, options.bitrate))
+    ensure_deno()
+    log_download_causes()
+    # One track at a time: parallel downloads made YouTube/SoundCloud refuse
+    # requests and flooded the connection; "threads" is for searching only.
+    downloader = Downloader(downloader_settings(options.out_dir, 1, options.bitrate))
     downloader.progress_handler.update_callback = lambda tracker, message: on_status(
         tracker.song.url, message, int(tracker.progress or 0)
     )

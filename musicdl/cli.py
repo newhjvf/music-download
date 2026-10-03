@@ -23,7 +23,7 @@ console = Console()
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-o", "--out", type=Path, default=Path("music"), help="папка для mp3 (по умолчанию ./music)")
-    common.add_argument("-t", "--threads", type=int, default=4, help="параллельных загрузок (по умолчанию 4)")
+    common.add_argument("-t", "--threads", type=int, default=4, help="параллельных поисков (по умолчанию 4); треки скачиваются по одному")
     common.add_argument("--dry-run", action="store_true", help="только поиск и сопоставление, без скачивания")
     common.add_argument("--bitrate", default="320k", help="битрейт mp3, например 192k или 320k (по умолчанию 320k)")
     common.add_argument("--report", type=Path, help="куда писать not_found.csv (по умолчанию в папку --out)")

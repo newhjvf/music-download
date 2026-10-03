@@ -156,3 +156,37 @@ def test_cache_from_older_matching_rules_is_ignored(tmp_path):
     path = tmp_path / "old.json"
     path.write_text(json.dumps({"version": VERSION - 1, "entries": {"x|all": {"url": "u", "time": 9e12}}}), encoding="utf-8")
     assert MatchCache(path).entries == {}
+
+
+def test_tracks_are_downloaded_one_at_a_time(monkeypatch, tmp_path):
+    from musicdl import job
+
+    captured = {}
+
+    class FakeDownloader:
+        errors: list = []
+        progress_handler = type("P", (), {})()
+
+        def __init__(self, settings):
+            captured.update(settings)
+
+        def download_multiple_songs(self, songs):
+            return []
+
+    import spotdl.download.downloader as spotdl_downloader
+
+    monkeypatch.setattr(spotdl_downloader, "Downloader", FakeDownloader)
+    monkeypatch.setattr(job, "ensure_deno", lambda: None)
+    monkeypatch.setattr(job, "log_download_causes", lambda: None)
+    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path, threads=8)
+    job.download_songs([object()], options, lambda *a: None)
+    assert captured["threads"] == 1
+
+
+def test_ensure_deno_never_raises(monkeypatch):
+    import spotdl.utils.deno as deno
+    from musicdl import job
+
+    monkeypatch.setattr(deno, "is_deno_installed", lambda *a: False)
+    monkeypatch.setattr(deno, "download_deno", lambda: (_ for _ in ()).throw(OSError("offline")))
+    job.ensure_deno()  # logs a warning, does not raise

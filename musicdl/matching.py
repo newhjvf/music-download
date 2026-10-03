@@ -156,6 +156,27 @@ NOT_ORIGINAL = [
 ]
 
 
+# Censored versions: fine if nothing else exists, but an uncensored upload is
+# preferred (the search is repeated without this rule only when it finds nothing).
+CENSORED = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"без\s*мата",
+        r"\bцензур\w*",
+        r"\bcensored\b",
+        r"\bclean\s*(?:version|ver\.?)\b",
+        r"\bclean\b",
+        r"\bзапиканн\w*",
+    )
+]
+
+
+def censored_words(song: Song, result: Result) -> List[str]:
+    wanted = song.name or ""
+    got = result.name or ""
+    return [p.pattern for p in CENSORED if p.search(got) and not p.search(wanted)]
+
+
 def not_original_words(song: Song, result: Result) -> List[str]:
     """Markers like 'type beat', 'кавер', 'live' found in the result title but
     not in the song title."""
@@ -164,10 +185,13 @@ def not_original_words(song: Song, result: Result) -> List[str]:
     return [p.pattern for p in NOT_ORIGINAL if p.search(got) and not p.search(wanted)]
 
 
-def acceptable(song: Song, result: Result) -> bool:
+def acceptable(song: Song, result: Result, allow_censored: bool = False) -> bool:
     """Result can be the original song: title matches and no 'not original'
-    markers (beats, covers, live, remixes, diss tracks...)."""
-    return title_matches(song, result) and not not_original_words(song, result)
+    markers (beats, covers, live, remixes, diss tracks...), and, unless
+    ``allow_censored``, not a censored version."""
+    if not title_matches(song, result) or not_original_words(song, result):
+        return False
+    return allow_censored or not censored_words(song, result)
 
 
 def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
@@ -185,13 +209,14 @@ def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
 
 
 def _search_once(
-    provider: AudioProvider, song: Song, only_verified: bool
-) -> Tuple[Optional[str], Optional[Result], int]:
+    provider: AudioProvider, song: Song, only_verified: bool, allow_censored: bool = False
+) -> Tuple[Optional[str], Optional[Result], int, bool]:
     """spotDL's ``provider.search`` plus the chosen ``Result`` and the number
     of raw results the source returned, without the slow per-result
     view-count lookups."""
     seen: Dict[str, Result] = {}
     dropped: List[str] = []
+    censored: List[str] = []  # dropped only because they are censored versions
     original_get_results = provider.get_results
 
     def recording_get_results(search_term: str, *args, **kwargs) -> List[Result]:
@@ -199,10 +224,12 @@ def _search_once(
         kept = []
         for result in results:
             seen.setdefault(result.url, result)
-            if acceptable(song, result):
+            if acceptable(song, result, allow_censored):
                 kept.append(result)
             else:
                 dropped.append(result.name)
+                if not allow_censored and acceptable(song, result, True):
+                    censored.append(result.name)
         return kept
 
     def no_view_lookup(url: str) -> int:
@@ -230,7 +257,7 @@ def _search_once(
             len(dropped),
             dropped[:3],
         )
-    return url, (seen.get(url) if url else None), len(seen)
+    return url, (seen.get(url) if url else None), len(seen), bool(censored)
 
 
 def find_match(
@@ -260,7 +287,12 @@ def find_match(
         raw_results = 0
         for variant in query_variants(song):
             try:
-                url, result, raw = _search_once(provider, variant, only_verified)
+                url, result, raw, had_censored = _search_once(provider, variant, only_verified)
+                allow_censored = False
+                if not url and had_censored:
+                    # only censored uploads exist: better than nothing
+                    allow_censored = True
+                    url, result, raw, _ = _search_once(provider, variant, only_verified, True)
             except Exception as exc:  # network errors, YouTube blocks, API changes
                 logger.debug("%s search failed for %s: %s", source, song.display_name, exc, exc_info=True)
                 error = short_error(exc)
@@ -273,7 +305,7 @@ def find_match(
                 continue
             if result is None:
                 return MatchResult(song=song, url=url, source=source)
-            if not acceptable(song, result):
+            if not acceptable(song, result, allow_censored):
                 logger.info("Rejected %s for %s: title %r", url, song.display_name, result.name)
                 continue
             return MatchResult(

@@ -223,7 +223,7 @@ class App:
         options.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(options, text="Качество").pack(side="left")
         ttk.Combobox(options, textvariable=self.bitrate, values=BITRATES, width=6, state="readonly").pack(side="left", padx=(6, 14))
-        ttk.Label(options, text="Одновременно").pack(side="left")
+        ttk.Label(options, text="Поиск одновременно").pack(side="left")
         ttk.Spinbox(options, from_=1, to=8, textvariable=self.threads, width=4).pack(side="left", padx=6)
         verified_box = ttk.Frame(target)
         verified_box.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -705,6 +705,9 @@ def _setup_io() -> None:
     if sys.stdout is None or sys.stderr is None or "pythonw" in Path(sys.executable).name.lower():
         sys.stdout = log
         sys.stderr = log
+    from musicdl.winproc import hide_child_consoles
+
+    hide_child_consoles()  # no black ffmpeg windows
     logging.basicConfig(
         stream=log,
         level=logging.INFO,
