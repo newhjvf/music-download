@@ -152,12 +152,21 @@ NOT_ORIGINAL = [
         r"\bреакци\w*",
         r"\btutorial\b",
         r"\bразбор\b",
+        r"roblox",
+        r"роблокс",
+        r"minecraft",
+        r"майнкрафт",
+        r"\bgameplay\b",
+        r"\bгеймплей\b",
+        r"\bamv\b",
+        r"tik\s*tok",
+        r"тик\s*ток",
+        r"#shorts?\b",
     )
 ]
 
 
-# Censored versions: fine if nothing else exists, but an uncensored upload is
-# preferred (the search is repeated without this rule only when it finds nothing).
+# Censored versions are used only when nothing else exists (see ``Candidate``).
 CENSORED = [
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -185,13 +194,10 @@ def not_original_words(song: Song, result: Result) -> List[str]:
     return [p.pattern for p in NOT_ORIGINAL if p.search(got) and not p.search(wanted)]
 
 
-def acceptable(song: Song, result: Result, allow_censored: bool = False) -> bool:
+def acceptable(song: Song, result: Result) -> bool:
     """Result can be the original song: title matches and no 'not original'
-    markers (beats, covers, live, remixes, diss tracks...), and, unless
-    ``allow_censored``, not a censored version."""
-    if not title_matches(song, result) or not_original_words(song, result):
-        return False
-    return allow_censored or not censored_words(song, result)
+    markers (beats, covers, live, remixes, diss tracks, game videos...)."""
+    return title_matches(song, result) and not not_original_words(song, result)
 
 
 def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
@@ -208,47 +214,135 @@ def title_matches(song: Song, result: Result, threshold: float = 70.0) -> bool:
     return max(fuzz.partial_ratio(wanted, got), fuzz.token_set_ratio(wanted, got)) >= threshold
 
 
-def _search_once(
-    provider: AudioProvider, song: Song, only_verified: bool, allow_censored: bool = False
-) -> Tuple[Optional[str], Optional[Result], int, bool]:
-    """spotDL's ``provider.search`` plus the chosen ``Result`` and the number
-    of raw results the source returned, without the slow per-result
-    view-count lookups."""
+# --- official uploads vs. random re-uploads --------------------------------
+
+_CHANNEL_NOISE = re.compile(r"\b(?:vevo|official|music|records?|topic|channel|канал|музыка)\b|[-–—]", re.IGNORECASE)
+MAX_REUPLOAD_DIFF = 10  # seconds of difference from the Spotify length
+
+
+def _normalized(text: str) -> str:
+    from spotdl.utils.formatter import slugify
+
+    return slugify(text or "").replace("-", " ").strip()
+
+
+def is_official(song: Song, result: Result) -> bool:
+    """A YouTube Music song, a verified SoundCloud account, an auto-generated
+    "Artist - Topic" channel, or a channel that is the artist itself."""
+    from rapidfuzz import fuzz
+
+    if result.verified:
+        return True
+    author = (result.author or "").strip()
+    if author.lower().endswith("- topic"):
+        return True
+    channel = _normalized(_CHANNEL_NOISE.sub(" ", author))
+    if not channel:
+        return False
+    artists = song.artists or ([song.artist] if song.artist else [])
+    return any(
+        fuzz.ratio(channel, _normalized(_CHANNEL_NOISE.sub(" ", artist))) >= 85 for artist in artists if artist
+    )
+
+
+@dataclass
+class Candidate:
+    result: Result
+    source: str  # "YouTube Music" / "YouTube" / "SoundCloud"
+    score: float  # spotDL's match score (title, artist, album, length)
+    official: bool
+    censored: bool = False
+    licensed: bool = False  # YouTube says "Music in this video" / auto-generated
+
+    @property
+    def value(self) -> float:
+        value = self.score + (25 if self.official or self.licensed else 0)
+        return value - (50 if self.censored else 0)
+
+
+Describe = Callable[[str], Optional[Dict[str, Any]]]
+
+
+def youtube_details(url: str) -> Optional[Dict[str, Any]]:
+    """What YouTube says about a video: its category ("Music", "Gaming"...) and
+    whether it carries licensed music metadata. None if it cannot be read."""
+    from yt_dlp import YoutubeDL
+
+    from spotdl.utils.deno import get_local_deno_yt_dlp_options
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 20,
+        "extractor_retries": 1,
+        **get_local_deno_yt_dlp_options(),
+    }
+    try:
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:  # blocked, private, no network...
+        logger.debug("Could not inspect %s: %s", url, exc)
+        return None
+    if not info:
+        return None
+    description = info.get("description") or ""
+    return {
+        "categories": [str(c) for c in (info.get("categories") or [])],
+        "licensed": bool(info.get("track") and (info.get("artist") or info.get("creator")))
+        or description.startswith("Provided to YouTube by"),
+    }
+
+
+def _is_youtube_video(url: str) -> bool:
+    return "://www.youtube.com/watch" in url
+
+
+def _duration_gap(song: Song, result: Result) -> Optional[float]:
+    if song.duration and result.duration:
+        return abs(float(song.duration) - float(result.duration))
+    return None
+
+
+def collect_candidates(
+    provider: AudioProvider, song: Song, source: str
+) -> Tuple[List[Candidate], int]:
+    """All usable results of one source with spotDL's scores (same queries as
+    spotDL's own ``provider.search``). Returns (candidates, raw result count)."""
+    from spotdl.utils.formatter import create_song_title
+
+    query = create_song_title(song.name, song.artists).lower()
     seen: Dict[str, Result] = {}
     dropped: List[str] = []
-    censored: List[str] = []  # dropped only because they are censored versions
-    original_get_results = provider.get_results
+    kept: List[Result] = []
 
-    def recording_get_results(search_term: str, *args, **kwargs) -> List[Result]:
-        results = original_get_results(search_term, *args, **kwargs)
-        kept = []
+    def take(results: List[Result]) -> None:
         for result in results:
             seen.setdefault(result.url, result)
-            if acceptable(song, result, allow_censored):
+            if acceptable(song, result):
                 kept.append(result)
             else:
                 dropped.append(result.name)
-                if not allow_censored and acceptable(song, result, True):
-                    censored.append(result.name)
-        return kept
 
-    def no_view_lookup(url: str) -> int:
-        # spotDL fetches the view count of up to 8 near-equal results with a
-        # full yt-dlp request each, only as a tie-breaker. That was most of
-        # the search time (and YouTube often refuses it), so results without
-        # a known view count simply count as 0 and keep their match score order.
-        return 0
+    if song.isrc and provider.SUPPORTS_ISRC and not provider.search_query:
+        take(provider.get_results(song.isrc))
+    for options in provider.GET_RESULTS_OPTS:
+        take(provider.get_results(query, **options))
 
-    provider.get_results = recording_get_results  # type: ignore[method-assign]
-    provider.get_views = no_view_lookup  # type: ignore[method-assign]
-    try:
-        url = provider.search(song, only_verified)
-    finally:
-        del provider.get_results  # restore the class methods
-        del provider.get_views
-    if not url:
-        # One line per failed search: tells "source gave nothing" (blocked)
-        # from "gave results that were all rejected" (matching rules).
+    unique = list({result.url: result for result in kept}.values())
+    scores = order_results(unique, song, provider.search_query) if unique else {}
+    candidates = [
+        Candidate(
+            result=result,
+            source=source,
+            score=score,
+            official=is_official(song, result),
+            censored=bool(censored_words(song, result)),
+        )
+        for result, score in scores.items()
+    ]
+    if not candidates:
         logger.info(
             "%s: no match for %s: %d results, %d rejected %s",
             provider.name,
@@ -257,7 +351,38 @@ def _search_once(
             len(dropped),
             dropped[:3],
         )
-    return url, (seen.get(url) if url else None), len(seen), bool(censored)
+    return candidates, len(seen)
+
+
+def choose(
+    song: Song, candidates: List[Candidate], only_official: bool, describe: Optional[Describe] = None
+) -> Optional[Candidate]:
+    """Best official upload; otherwise (unless ``only_official``) the best
+    re-upload that is really music of the right length."""
+    ranked = sorted(candidates, key=lambda c: c.value, reverse=True)
+    official = [c for c in ranked if c.official]
+    if official:
+        return official[0]
+    if only_official:
+        return None
+    for candidate in ranked:
+        gap = _duration_gap(song, candidate.result)
+        if gap is not None and gap > MAX_REUPLOAD_DIFF:
+            logger.info("Skipped %s: length differs by %.0f s", candidate.result.url, gap)
+            continue
+        if describe is not None and _is_youtube_video(candidate.result.url):
+            details = describe(candidate.result.url)
+            if details is None:
+                # A random upload we cannot look at is not worth the risk.
+                logger.info("Skipped %s: could not inspect the video", candidate.result.url)
+                continue
+            if details["licensed"]:
+                candidate.licensed = True
+            elif details["categories"] and "Music" not in details["categories"]:
+                logger.info("Skipped %s: category %s", candidate.result.url, details["categories"])
+                continue
+        return candidate
+    return None
 
 
 def find_match(
@@ -265,10 +390,13 @@ def find_match(
     song: Song,
     only_verified: bool = False,
     on_try: Optional[Callable[[str], None]] = None,
+    describe: Optional[Describe] = None,
 ) -> MatchResult:
-    """Try each provider (YouTube Music, then YouTube, then SoundCloud) and
-    each title variant until a result passes spotDL's scoring and our title
-    check. Providers must not be shared between threads."""
+    """Look in every source (YouTube Music, YouTube, SoundCloud), stopping at
+    the first one that has an official upload, and pick the best candidate:
+    official uploads first, then re-uploads that pass the music/length checks
+    (``only_verified`` = official uploads only). Providers must not be shared
+    between threads."""
     if isinstance(providers, AudioProvider):
         providers = [providers]
 
@@ -279,6 +407,7 @@ def find_match(
     answered = False  # at least one source returned real search results
     used_any = False  # at least one source could be started
     silent: Optional[str] = None  # a source that answered without a single result
+    candidates: List[Candidate] = []
     for provider in providers:
         used_any = True
         source = SOURCE_NAMES.get(provider.name, provider.name)
@@ -287,12 +416,7 @@ def find_match(
         raw_results = 0
         for variant in query_variants(song):
             try:
-                url, result, raw, had_censored = _search_once(provider, variant, only_verified)
-                allow_censored = False
-                if not url and had_censored:
-                    # only censored uploads exist: better than nothing
-                    allow_censored = True
-                    url, result, raw, _ = _search_once(provider, variant, only_verified, True)
+                found, raw = collect_candidates(provider, variant, source)
             except Exception as exc:  # network errors, YouTube blocks, API changes
                 logger.debug("%s search failed for %s: %s", source, song.display_name, exc, exc_info=True)
                 error = short_error(exc)
@@ -301,34 +425,36 @@ def find_match(
             raw_results += raw
             if raw:
                 answered = True
-            if not url:
-                continue
-            if result is None:
-                return MatchResult(song=song, url=url, source=source)
-            if not acceptable(song, result, allow_censored):
-                logger.info("Rejected %s for %s: title %r", url, song.display_name, result.name)
-                continue
-            return MatchResult(
-                song=song,
-                url=url,
-                title=result.name,
-                author=", ".join(result.artists) if result.artists else result.author,
-                duration=result.duration,
-                verified=result.verified,
-                source=source,
-            )
+            candidates.extend(found)
+            if found:
+                break
         else:
             if not raw_results:
                 # A real song always gets some hits; none at all means the
                 # source is blocking or throttling us, not "track not found".
                 silent = source
+        if any(c.official and not c.censored for c in candidates):
+            break  # an official upload exists: no need to look further
+
+    best = choose(song, candidates, only_verified, describe)
+    if best is not None:
+        result = best.result
+        return MatchResult(
+            song=song,
+            url=result.url,
+            title=result.name,
+            author=", ".join(result.artists) if result.artists else result.author,
+            duration=result.duration,
+            verified=best.official or best.licensed,
+            source=best.source,
+        )
     if not used_any:
         failure = getattr(providers, "last_error", None)
         if failure is not None:
             error = "Источники поиска недоступны: " + short_error(failure)
             network_error = looks_like_network_error(failure)
     elif answered and not network_error:
-        error = None  # a source searched fine and had nothing: plain "not found"
+        error = None  # a source searched fine and had nothing good enough: plain "not found"
     elif silent and not error and not network_error:
         error = f"{silent}: пустой ответ (возможно, блокировка)"
     return MatchResult(song=song, error=error or "not found", network_error=network_error)
@@ -398,10 +524,15 @@ def default_provider_factory(only_verified: bool = False) -> ProviderChain:
 
     YouTube = _fast_youtube_class()
 
-    factories: List[Callable[[], AudioProvider]] = [lambda: YouTubeMusic(output_format="mp3")]
-    if not only_verified:  # "official tracks only" = YouTube Music songs only
-        factories += [lambda: YouTube(output_format="mp3"), lambda: SoundCloud(output_format="mp3")]
-    return ProviderChain(factories)
+    # "Official tracks only" still searches every source: an artist's own
+    # SoundCloud page or "Artist - Topic" channel is official too.
+    return ProviderChain(
+        [
+            lambda: YouTubeMusic(output_format="mp3"),
+            lambda: YouTube(output_format="mp3"),
+            lambda: SoundCloud(output_format="mp3"),
+        ]
+    )
 
 
 def find_matches(
@@ -420,6 +551,8 @@ def find_matches(
     source starts being searched for a song; once ``cancel`` is set the
     remaining songs are returned with ``error="cancelled"``."""
     local = threading.local()
+    # Inspecting YouTube videos (category, licensed music) only for real searches
+    describe = youtube_details if provider_factory is default_provider_factory else None
 
     def make_providers():
         if provider_factory is default_provider_factory:
@@ -435,7 +568,7 @@ def find_matches(
         if providers is None:
             providers = local.providers = make_providers()
         tried = (lambda source: on_try(song, source)) if on_try else None
-        match = find_match(providers, song, only_verified, on_try=tried)
+        match = find_match(providers, song, only_verified, on_try=tried, describe=describe)
         # Connection lost: wait until it is back and search this song again
         # instead of reporting it as not found.
         attempts = 0
@@ -443,7 +576,7 @@ def find_matches(
             attempts += 1
             if not guard.wait_until_online():
                 return MatchResult(song=song, error=CANCELLED)
-            match = find_match(providers, song, only_verified, on_try=tried)
+            match = find_match(providers, song, only_verified, on_try=tried, describe=describe)
         if on_result:
             on_result(match)
         return match
