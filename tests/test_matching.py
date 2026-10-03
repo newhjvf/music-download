@@ -100,7 +100,7 @@ def test_short_error():
 
 # --- fallbacks, title variants, sanity check -------------------------------
 
-from musicdl.matching import ProviderChain, clean_title, query_variants, title_matches  # noqa: E402
+from musicdl.matching import ProviderChain, clean_title, is_official, query_variants, title_matches  # noqa: E402
 
 
 class SecondSource(StubProvider):
@@ -311,3 +311,71 @@ def test_censored_version_is_used_only_when_nothing_else_exists():
     other = make_result("plain", "Smells Like Teen Spirit", ["Nirvana"], 301, album="Nevermind")
     match = find_match(StubProvider({QUERY: [censored, other]}), song())
     assert match.url == other.url
+
+
+# --- official uploads vs. random re-uploads ---------------------------------
+
+import dataclasses  # noqa: E402
+
+
+def reupload(video_id="kid", name="Smells Like Teen Spirit", duration=301, author="some kid"):
+    result = make_result(video_id, name, ["Nirvana"], duration, verified=False, album="Nevermind")
+    return dataclasses.replace(result, author=author)
+
+
+def details(categories=("Music",), licensed=False):
+    return lambda url: {"categories": list(categories), "licensed": licensed}
+
+
+def test_game_video_is_rejected_by_title():
+    s = song(duration=301)
+    video = reupload(name="Smells Like Teen Spirit | Roblox")
+    assert not acceptable(s, video)
+
+
+def test_reupload_that_is_not_in_the_music_category_is_rejected():
+    s = song(duration=301)
+    provider = StubProvider({QUERY: [reupload()]})
+    assert not find_match(provider, s, describe=details(["Gaming"])).found
+    assert find_match(StubProvider({QUERY: [reupload()]}), s, describe=details(["Music"])).found
+
+
+def test_reupload_with_wrong_length_is_rejected():
+    s = song(duration=301)
+    assert not find_match(StubProvider({QUERY: [reupload(duration=290)]}), s, describe=details()).found
+    assert find_match(StubProvider({QUERY: [reupload(duration=305)]}), s, describe=details()).found
+
+
+def test_uninspectable_reupload_is_rejected():
+    s = song(duration=301)
+    nothing = lambda url: None  # noqa: E731 - YouTube refused the request
+    assert not find_match(StubProvider({QUERY: [reupload(duration=301)]}), s, describe=nothing).found
+
+
+def test_licensed_video_counts_as_official():
+    s = song(duration=301)
+    match = find_match(StubProvider({QUERY: [reupload()]}), s, describe=details(["Gaming"], licensed=True))
+    assert match.found and match.verified
+
+
+def test_official_upload_beats_better_scored_reupload_and_stops_the_search():
+    s = song(duration=301)
+    official = dataclasses.replace(reupload("topic", author="Nirvana - Topic"), duration=300)
+    second = SecondSource({QUERY: [reupload("late")]})
+    match = find_match([StubProvider({QUERY: [reupload("kid"), official]}), second], s, describe=details())
+    assert match.url == official.url and match.verified
+    assert second.queries == []  # official found: later sources are not searched
+
+
+def test_channel_named_like_the_artist_is_official():
+    s = song(duration=301)
+    channel = reupload("own", author="Nirvana")
+    assert is_official(s, channel)
+    assert not is_official(s, reupload("kid", author="some kid"))
+
+
+def test_official_only_accepts_official_uploads_from_any_source_and_nothing_else():
+    s = song(duration=301)
+    assert not find_match(StubProvider({QUERY: [reupload()]}), s, only_verified=True, describe=details()).found
+    topic = reupload("topic", author="Nirvana - Topic")
+    assert find_match(StubProvider({QUERY: [topic]}), s, only_verified=True).found

@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--dry-run", action="store_true", help="только поиск и сопоставление, без скачивания")
     common.add_argument("--bitrate", default="320k", help="битрейт mp3, например 192k или 320k (по умолчанию 320k)")
     common.add_argument("--report", type=Path, help="куда писать not_found.csv (по умолчанию в папку --out)")
-    common.add_argument("--only-verified", action="store_true", help="только официальные треки YouTube Music (без YouTube и SoundCloud)")
+    common.add_argument("--only-verified", action="store_true", help="только официальные загрузки (YouTube Music, каналы исполнителей, SoundCloud исполнителей)")
     common.add_argument("-v", "--verbose", action="store_true", help="подробный лог")
 
     parser = argparse.ArgumentParser(

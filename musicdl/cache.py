@@ -20,7 +20,7 @@ from musicdl.matching import MatchResult
 logger = logging.getLogger(__name__)
 
 MAX_AGE_DAYS = 30
-VERSION = 2  # bump when matching rules change: old matches are searched again
+VERSION = 3  # bump when matching rules change: old matches are searched again
 
 
 def song_key(song: Song, only_verified: bool) -> str:
