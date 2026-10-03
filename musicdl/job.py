@@ -5,6 +5,7 @@ shared by the command line and the window. Progress is reported through
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -147,6 +148,42 @@ def ensure_deno() -> None:
         logger.warning("Could not get Deno: %s", exc)
 
 
+def original_soundcloud_files(songs: List[Song]) -> Dict[str, str]:
+    """Where the artist allows downloads on SoundCloud, download the original
+    file (often 320 kbps or lossless) instead of the ~128 kbps stream.
+    SoundCloud may demand a login for this: set SOUNDCLOUD_AUTH_TOKEN (the
+    ``oauth_token`` cookie of a logged-in browser) to make it work for sure.
+    Best effort: any failure keeps the normal stream. Returns how many tracks
+    were switched, as {song.url: the stream URL it had before}."""
+    targets = [song for song in songs if "soundcloud.com/" in (song.download_url or "")]
+    if not targets:
+        return {}
+    try:
+        from dotenv import load_dotenv
+        from soundcloud import SoundCloud
+        from soundcloud.resource.track import Track
+
+        load_dotenv(Path.cwd() / ".env", override=False)
+        client = SoundCloud(auth_token=os.environ.get("SOUNDCLOUD_AUTH_TOKEN") or None)
+    except Exception as exc:
+        logger.info("SoundCloud original files unavailable: %s", exc)
+        return {}
+    switched: Dict[str, str] = {}
+    for song in targets:
+        try:
+            track = client.resolve(song.download_url)
+            if not isinstance(track, Track) or not track.downloadable:
+                continue
+            original = client.get_track_original_download(track.id, track.secret_token)
+            if original:
+                switched[song.url] = song.download_url
+                song.download_url = original
+        except Exception as exc:  # login required, limit reached, no network...
+            logger.info("No original file for %s: %s", song.download_url, exc)
+    logger.info("SoundCloud original files: %d of %d tracks", switched, len(targets))
+    return switched
+
+
 def log_download_causes() -> None:
     """spotDL reports a failed download only as "YT-DLP download error - <url>";
     also write the real reason to the log. Idempotent."""
@@ -181,6 +218,7 @@ def download_songs(
     Path(options.out_dir).mkdir(parents=True, exist_ok=True)
     ensure_deno()
     log_download_causes()
+    switched = original_soundcloud_files(songs)
     # One track at a time: parallel downloads made YouTube/SoundCloud refuse
     # requests and flooded the connection; "threads" is for searching only.
     downloader = Downloader(downloader_settings(options.out_dir, 1, options.bitrate))
@@ -188,6 +226,14 @@ def download_songs(
         tracker.song.url, message, int(tracker.progress or 0)
     )
     results = downloader.download_multiple_songs(songs)
+    # An original file that did not download: go back to the normal stream.
+    fallback = [song for song, path in results if not is_complete(path) and song.url in switched]
+    if fallback:
+        for song in fallback:
+            song.download_url = switched[song.url]
+        logger.info("Original SoundCloud files failed for %d tracks, using the stream", len(fallback))
+        retried = {song.url: path for song, path in downloader.download_multiple_songs(fallback)}
+        results = [(song, retried.get(song.url, path)) for song, path in results]
     for error in downloader.errors:
         logger.warning(error)
     return results

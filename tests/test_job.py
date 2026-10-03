@@ -178,6 +178,7 @@ def test_tracks_are_downloaded_one_at_a_time(monkeypatch, tmp_path):
     monkeypatch.setattr(spotdl_downloader, "Downloader", FakeDownloader)
     monkeypatch.setattr(job, "ensure_deno", lambda: None)
     monkeypatch.setattr(job, "log_download_causes", lambda: None)
+    monkeypatch.setattr(job, "original_soundcloud_files", lambda songs: {})
     options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path, threads=8)
     job.download_songs([object()], options, lambda *a: None)
     assert captured["threads"] == 1
@@ -190,3 +191,87 @@ def test_ensure_deno_never_raises(monkeypatch):
     monkeypatch.setattr(deno, "is_deno_installed", lambda *a: False)
     monkeypatch.setattr(deno, "download_deno", lambda: (_ for _ in ()).throw(OSError("offline")))
     job.ensure_deno()  # logs a warning, does not raise
+
+
+def test_soundcloud_original_file_replaces_the_stream_when_downloadable(monkeypatch):
+    import soundcloud
+    from soundcloud.resource.track import Track
+    from musicdl import job
+
+    class FakeTrack(Track):
+        def __init__(self, downloadable):  # bypass the dataclass fields
+            object.__setattr__(self, "id", 7)
+            object.__setattr__(self, "secret_token", None)
+            object.__setattr__(self, "downloadable", downloadable)
+
+    class FakeClient:
+        def __init__(self, auth_token=None):
+            pass
+
+        def resolve(self, url):
+            return FakeTrack("free" in url)
+
+        def get_track_original_download(self, track_id, token):
+            return "https://cdn.example/original.wav"
+
+    monkeypatch.setattr(soundcloud, "SoundCloud", FakeClient)
+    free = type("S", (), {"download_url": "https://soundcloud.com/a/free"})()
+    locked = type("S", (), {"download_url": "https://soundcloud.com/a/locked"})()
+    youtube = type("S", (), {"download_url": "https://www.youtube.com/watch?v=x"})()
+    free.url, locked.url, youtube.url = "f", "l", "y"
+    assert job.original_soundcloud_files([free, locked, youtube]) == {"f": "https://soundcloud.com/a/free"}
+    assert free.download_url == "https://cdn.example/original.wav"
+    assert locked.download_url == "https://soundcloud.com/a/locked"
+    assert youtube.download_url == "https://www.youtube.com/watch?v=x"
+
+
+def test_soundcloud_original_failure_keeps_the_stream(monkeypatch):
+    import soundcloud
+    from musicdl import job
+
+    class Broken:
+        def __init__(self, auth_token=None):
+            pass
+
+        def resolve(self, url):
+            raise PermissionError("401 login required")
+
+    monkeypatch.setattr(soundcloud, "SoundCloud", Broken)
+    song = type("S", (), {"download_url": "https://soundcloud.com/a/b"})()
+    song.url = "s"
+    assert job.original_soundcloud_files([song]) == {}
+    assert song.download_url == "https://soundcloud.com/a/b"
+
+
+def test_failed_original_file_falls_back_to_the_stream(monkeypatch, tmp_path):
+    from musicdl import job
+    import spotdl.download.downloader as spotdl_downloader
+
+    class Song:
+        url = "spotify:1"
+        download_url = "https://cdn.example/original.wav"
+
+    song = Song()
+    good = tmp_path / "a.mp3"
+    good.write_bytes(b"0" * job.MIN_FILE_SIZE)
+    calls = []
+
+    class FakeDownloader:
+        errors: list = []
+        progress_handler = type("P", (), {})()
+
+        def __init__(self, settings):
+            pass
+
+        def download_multiple_songs(self, songs):
+            calls.append(songs[0].download_url)
+            return [(songs[0], None if len(calls) == 1 else good)]
+
+    monkeypatch.setattr(spotdl_downloader, "Downloader", FakeDownloader)
+    monkeypatch.setattr(job, "ensure_deno", lambda: None)
+    monkeypatch.setattr(job, "log_download_causes", lambda: None)
+    monkeypatch.setattr(job, "original_soundcloud_files", lambda songs: {"spotify:1": "https://soundcloud.com/a/b"})
+    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path)
+    results = job.download_songs([song], options, lambda *a: None)
+    assert calls == ["https://cdn.example/original.wav", "https://soundcloud.com/a/b"]
+    assert results == [(song, good)]
