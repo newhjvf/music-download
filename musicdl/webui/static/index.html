@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>musicdl</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%237566f5'/%3E%3Cpath d='M26 44V20l18-4v24' fill='none' stroke='white' stroke-width='4.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='21' cy='44' r='5.5' fill='white'/%3E%3Ccircle cx='39' cy='40' r='5.5' fill='white'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-note" viewBox="0 0 24 24"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3A4 4 0 0 0 11 18.7l1-1"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19z"/><path d="M12 10v4M12 17.2v.1"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.1"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 10 14"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-clipboard" viewBox="0 0 24 24"><rect x="8" y="3" width="8" height="4" rx="1"/><path d="M16 5h2a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h2"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M2 8.8a15 15 0 0 1 4-2.4M22 8.8a15 15 0 0 0-9.4-4.3M5 12.8a10 10 0 0 1 3.6-2.1M19 12.8a10 10 0 0 0-3.7-2.2M8.5 16.4a5 5 0 0 1 7 0"/><path d="M12 20h.01M2 2l20 20"/></symbol>
+    <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="m6 13 6 6 6-6"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 20h14"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></symbol>
+  </defs>
+</svg>
+
+<div class="app" id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo"><svg class="ic"><use href="#i-note"/></svg></span>
+      <span class="brand-name">musicdl</span>
+      <span class="ver" id="version"></span>
+    </div>
+    <div class="top-actions">
+      <span class="demo-tag" id="demoTag" hidden>демо-режим</span>
+      <button class="icon-btn" id="themeBtn" type="button" title="Тема: светлая / тёмная" aria-label="Переключить тему">
+        <svg class="ic" id="themeIcon"><use href="#i-sun"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="banner banner-warn" id="offline" role="status" hidden>
+    <svg class="ic"><use href="#i-wifi-off"/></svg>
+    <span><b>Нет интернета.</b> Жду подключения — работа продолжится сама, ничего нажимать не нужно.</span>
+  </div>
+
+  <main class="main">
+
+    <!-- Setup: collapses to one line while a run is in progress -->
+    <section class="setup" id="setup" data-open="true">
+      <div class="setup-clip">
+        <div class="setup-grid" id="setupGrid">
+
+          <div class="card" id="sourceCard">
+            <div class="card-head">
+              <h2>Откуда брать треки</h2>
+              <div class="seg" role="tablist" aria-label="Источник">
+                <button type="button" role="tab" data-mode="csv" id="modeCsv">CSV из TuneMyMusic</button>
+                <button type="button" role="tab" data-mode="url" id="modeUrl">Ссылка Spotify</button>
+              </div>
+            </div>
+
+            <div class="pane" id="paneCsv">
+              <button type="button" class="drop" id="dropZone">
+                <span class="drop-icon"><svg class="ic"><use href="#i-upload"/></svg></span>
+                <span class="drop-text">
+                  <b>Перетащите CSV-файл сюда</b>
+                  <span>или нажмите, чтобы выбрать <kbd>Ctrl</kbd>+<kbd>O</kbd></span>
+                </span>
+              </button>
+              <div class="filecard" id="fileCard" hidden>
+                <span class="file-icon"><svg class="ic"><use href="#i-file"/></svg></span>
+                <span class="file-text">
+                  <b id="fileName"></b>
+                  <span id="filePath"></span>
+                </span>
+                <button type="button" class="btn btn-ghost btn-sm" id="fileChange">Заменить</button>
+              </div>
+              <button type="button" class="linkbtn" id="manualToggle">указать путь вручную</button>
+              <input class="input" id="csvPath" type="text" spellcheck="false" placeholder="C:\Users\…\playlist.csv" hidden>
+            </div>
+
+            <div class="pane" id="paneUrl" hidden>
+              <div class="input-group">
+                <svg class="ic input-icon"><use href="#i-link"/></svg>
+                <input class="input has-icon" id="linkInput" type="text" spellcheck="false" autocomplete="off"
+                       placeholder="https://open.spotify.com/playlist/…">
+                <button type="button" class="btn btn-secondary" id="pasteBtn"><svg class="ic"><use href="#i-clipboard"/></svg>Вставить</button>
+              </div>
+              <div class="hint" id="linkHint">В Spotify: «Поделиться → Копировать ссылку». Подходят трек, альбом и публичный плейлист.</div>
+            </div>
+          </div>
+
+          <div class="card" id="destCard">
+            <div class="card-head"><h2>Куда и как сохранять</h2></div>
+            <div class="input-group">
+              <svg class="ic input-icon"><use href="#i-folder"/></svg>
+              <input class="input has-icon" id="outDir" type="text" spellcheck="false" aria-label="Папка для музыки">
+              <button type="button" class="btn btn-secondary" id="outPick">Изменить</button>
+            </div>
+            <div class="opts">
+              <div class="opt">
+                <span class="opt-label">Качество</span>
+                <div class="seg seg-sm" id="bitrateSeg" role="radiogroup" aria-label="Качество mp3"></div>
+              </div>
+              <div class="opt">
+                <span class="opt-label" title="Сколько треков качать одновременно. Если много ошибок, поставьте 1–2">Одновременно</span>
+                <div class="stepper">
+                  <button type="button" id="thrMinus" aria-label="Меньше"><svg class="ic"><use href="#i-minus"/></svg></button>
+                  <output id="thrValue">4</output>
+                  <button type="button" id="thrPlus" aria-label="Больше"><svg class="ic"><use href="#i-plus"/></svg></button>
+                </div>
+              </div>
+            </div>
+            <label class="switch-row">
+              <span class="switch"><input type="checkbox" id="onlyVerified"><i></i></span>
+              <span class="switch-text"><b>Только официальные треки</b><span>Без клипов, концертных записей и каверов</span></span>
+            </label>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <div class="setup-strip" id="setupStrip" hidden>
+      <span class="strip-item" id="stripSource"></span>
+      <span class="strip-sep">→</span>
+      <span class="strip-item" id="stripDest"></span>
+      <span class="strip-meta" id="stripMeta"></span>
+      <button type="button" class="btn btn-ghost btn-sm" id="stripEdit">Изменить</button>
+    </div>
+
+    <!-- Actions -->
+    <section class="actions">
+      <div class="actions-left" id="idleActions">
+        <button type="button" class="btn btn-primary btn-lg" id="downloadBtn"><svg class="ic"><use href="#i-download"/></svg>Скачать</button>
+        <button type="button" class="btn btn-secondary btn-lg" id="checkBtn" title="Только найти треки, ничего не скачивая"><svg class="ic"><use href="#i-search"/></svg>Проверить без скачивания</button>
+      </div>
+      <div class="actions-left" id="busyActions" hidden>
+        <button type="button" class="btn btn-danger btn-lg" id="stopBtn"><svg class="ic"><use href="#i-stop"/></svg>Стоп</button>
+        <span class="busy-label" id="busyLabel"></span>
+      </div>
+      <div class="actions-right" id="timing"></div>
+    </section>
+
+    <!-- Progress -->
+    <section class="card run" id="run">
+      <div class="run-top">
+        <div class="run-phase"><span class="dot" id="phaseDot"></span><b id="phaseName">Готов к работе</b><span id="phaseCount"></span></div>
+        <div class="run-pct" id="phasePct"></div>
+      </div>
+      <div class="bar" id="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i id="barFill"></i></div>
+      <div class="chips" id="chips">
+        <span class="chip" data-k="total"><b id="c-total">—</b>в списке</span>
+        <span class="chip c-muted" data-k="existing"><b id="c-existing">—</b>уже были</span>
+        <span class="chip c-info" data-k="found"><b id="c-found">—</b>найдено</span>
+        <span class="chip c-bad" data-k="missing"><b id="c-missing">—</b>не найдено</span>
+        <span class="chip c-ok" data-k="done"><b id="c-done">—</b>скачано</span>
+      </div>
+      <div class="status" id="status" data-tone="info" aria-live="polite">
+        <svg class="ic"><use href="#i-info"/></svg><span id="statusText">Выберите CSV-файл или вставьте ссылку Spotify, затем нажмите «Скачать» или «Проверить».</span>
+      </div>
+    </section>
+
+    <!-- Tracks -->
+    <section class="card tracks" id="tracks">
+      <div class="tracks-bar">
+        <div class="seg seg-sm" id="filters" role="tablist" aria-label="Фильтр">
+          <button type="button" data-f="all" class="on">Все <span id="f-all">0</span></button>
+          <button type="button" data-f="ok">Успешно <span id="f-ok">0</span></button>
+          <button type="button" data-f="bad">Ошибки <span id="f-bad">0</span></button>
+          <button type="button" data-f="wait">Ожидают <span id="f-wait">0</span></button>
+        </div>
+        <div class="search">
+          <svg class="ic"><use href="#i-search"/></svg>
+          <input id="query" type="search" placeholder="Поиск по трекам  (Ctrl+F)" spellcheck="false" aria-label="Поиск по трекам">
+        </div>
+      </div>
+      <div class="notice" id="notice" hidden>
+        <svg class="ic"><use href="#i-alert"/></svg>
+        <span>Не удалось найти или скачать ни одного трека. Чаще всего это значит, что YouTube временно ограничил доступ. Попробуйте позже, включите VPN или уменьшите «Одновременно» до 1–2.</span>
+        <button type="button" class="icon-btn" id="noticeClose" aria-label="Закрыть"><svg class="ic"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="thead">
+        <div class="c-n">№</div><div class="c-track">Трек</div><div class="c-found">Найдено</div>
+        <div class="c-src">Источник</div><div class="c-dur">Длит.</div><div class="c-status">Статус</div>
+      </div>
+      <div class="tbody" id="tbody" tabindex="0" aria-label="Список треков">
+        <div class="spacer" id="spacer"></div>
+        <div class="empty" id="empty">
+          <div class="empty-art"><svg class="ic"><use href="#i-note"/></svg></div>
+          <b id="emptyTitle">Здесь появятся треки</b>
+          <span id="emptyText">Выберите CSV-файл или вставьте ссылку Spotify. «Проверить» покажет, что нашлось, а «Скачать» сохранит mp3 в вашу папку.</span>
+        </div>
+      </div>
+      <button type="button" class="follow" id="followBtn" hidden><svg class="ic"><use href="#i-arrow-down"/></svg>Следить за ходом</button>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <button type="button" class="btn btn-ghost" id="openOut"><svg class="ic"><use href="#i-folder"/></svg>Папка с музыкой</button>
+    <button type="button" class="btn btn-ghost" id="openReport" disabled><svg class="ic"><use href="#i-file"/></svg>Список ненайденных</button>
+    <span class="footer-hint">Клик по строке откроет найденное в браузере</span>
+    <button type="button" class="btn btn-ghost" id="openLog">Журнал ошибок</button>
+  </footer>
+</div>
+
+<div class="dropveil" id="dropVeil" hidden>
+  <div><svg class="ic"><use href="#i-upload"/></svg><b>Отпустите, чтобы добавить</b><span>CSV-файл из TuneMyMusic или ссылку Spotify</span></div>
+</div>
+
+<div class="lost" id="lost" hidden>
+  <div class="lost-box">
+    <svg class="ic"><use href="#i-pause"/></svg>
+    <b>Связь с программой потеряна</b>
+    <span>Скорее всего, программа закрыта. Закройте это окно и запустите musicdl снова.</span>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" aria-live="assertive"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
