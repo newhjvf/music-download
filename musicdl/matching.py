@@ -191,6 +191,7 @@ def _search_once(
     of raw results the source returned, without the slow per-result
     view-count lookups."""
     seen: Dict[str, Result] = {}
+    dropped: List[str] = []
     original_get_results = provider.get_results
 
     def recording_get_results(search_term: str, *args, **kwargs) -> List[Result]:
@@ -201,7 +202,7 @@ def _search_once(
             if acceptable(song, result):
                 kept.append(result)
             else:
-                logger.debug("Dropped %r for %s", result.name, song.display_name)
+                dropped.append(result.name)
         return kept
 
     def no_view_lookup(url: str) -> int:
@@ -218,6 +219,17 @@ def _search_once(
     finally:
         del provider.get_results  # restore the class methods
         del provider.get_views
+    if not url:
+        # One line per failed search: tells "source gave nothing" (blocked)
+        # from "gave results that were all rejected" (matching rules).
+        logger.info(
+            "%s: no match for %s: %d results, %d rejected %s",
+            provider.name,
+            song.display_name,
+            len(seen),
+            len(dropped),
+            dropped[:3],
+        )
     return url, (seen.get(url) if url else None), len(seen)
 
 
