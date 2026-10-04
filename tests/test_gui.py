@@ -48,7 +48,14 @@ def wait(app, root, timeout=10):
 
 
 def test_window_download_flow(root, tmp_path, monkeypatch):
-    results = {"queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)]}
+    other = [make_result("other", "Another One Bites the Dust", ["Queen"], 215)]  # a source that answers, just not with the track
+    results = {
+        "queen - bohemian rhapsody": [make_result("bohe", "Bohemian Rhapsody", ["Queen"], 355)],
+        "nirvana - smells like teen spirit": other,
+        "кино - кукушка": other,
+        "queen, david bowie - under pressure": other,
+        "queen - under pressure": other,
+    }
     run = functools.partial(
         job.run_job, provider_factory=lambda: StubProvider(results), downloader=fake_download, ffmpeg_check=lambda i: None
     )
@@ -145,3 +152,20 @@ def test_offline_banner_and_retry_row(root, tmp_path, monkeypatch):
     item = app.rows[song.url]
     assert app.table.set(item, "status") == "✔ скачано"
     assert app.counters["done"].get() == "1"
+
+
+def test_text_mode_validation_options_and_settings(root, tmp_path, monkeypatch):
+    shown = []
+    monkeypatch.setattr(gui.messagebox, "showwarning", lambda title, msg: shown.append(msg))
+    app = gui.App(root, run_job=lambda *a, **k: None)
+    app.mode.set("text")
+    app._on_mode_change()
+    app.start(dry_run=True)
+    assert "названия треков" in shown[0] and app.worker is None
+    app.query_box.insert("1.0", "Aarne - CULTURE\nBaby Cute - hooligang")
+    assert app._validate() is None
+    options = app.options(dry_run=True)
+    assert options.source_kind == "text" and options.source == "Aarne - CULTURE\nBaby Cute - hooligang"
+    assert int(app.threads.get()) == 3
+    app._save()
+    assert "Aarne - CULTURE" in gui.load_settings()["query"]

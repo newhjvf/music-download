@@ -211,3 +211,10 @@ def test_songs_from_url_uses_single_listing_request(monkeypatch):
     songs = songs_from_url("https://open.spotify.com/playlist/1FacUjfBAJd0HVjgVUTI9r?si=x")
     assert calls == [["https://open.spotify.com/playlist/1FacUjfBAJd0HVjgVUTI9r?si=x"]]
     assert songs[0].genres == []
+
+
+def test_cli_text_mode_builds_one_line_per_track():
+    args = cli.build_parser().parse_args(["text", "Aarne - CULTURE", "Baby Cute - hooligang"])
+    options = cli.options_from_args(args)
+    assert options.source_kind == "text" and options.source == "Aarne - CULTURE\nBaby Cute - hooligang"
+    assert options.threads == 3

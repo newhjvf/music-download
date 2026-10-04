@@ -122,8 +122,22 @@ def test_version_label_and_pycache_kept(tmp_path):
     cache = root / "musicdl" / "__pycache__"
     cache.mkdir()
     (cache / "x.pyc").write_bytes(b"pyc")
-    assert updater.version_label(root) == "версия не определена"
+    from musicdl import __version__
+
+    assert updater.version_label(root) == f"v{__version__}"
     assert updater.check_and_update(fetch=FakeGitHub(SHA1, release("1")), root=root) is True
-    assert updater.version_label(root) == "версия от 01.10.2026 11:05 UTC"
     assert (cache / "x.pyc").exists()  # never touched (may be in use)
     assert not list(root.rglob("*.new"))
+
+
+def test_version_is_semver_and_consistent():
+    import re
+    from pathlib import Path
+
+    from musicdl import __version__
+
+    repo = Path(__file__).resolve().parent.parent
+    assert re.fullmatch(r"\d+\.\d+\.\d+", __version__)
+    assert f'version = "{__version__}"' in (repo / "pyproject.toml").read_text(encoding="utf-8")
+    assert f"## v{__version__}" in (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert updater.version_label(None).startswith(f"v{__version__}")

@@ -81,7 +81,6 @@ def open_path(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 PALETTE = {
     "dark": {"ok": "#6ccb5f", "bad": "#ff6b6b", "active": "#60cdff", "muted": "#9a9a9a", "accent": "#60cdff"},
@@ -131,14 +130,12 @@ class App:
         self.cancel: Optional[threading.Event] = None
         self.rows: Dict[str, str] = {}  # song.url -> tree item
         self.links: Dict[str, str] = {}  # tree item -> found URL
-        self.active: Dict[str, str] = {}  # tree item -> text shown with a spinner
         self.report: Optional[Path] = None
         self.searched = self.search_total = 0
         self.phase_name = ""
         self.phase_done = self.phase_total = 0
         self.phase_started = 0.0
         self.started = 0.0
-        self.spin = 0
         self.offline = False
 
         settings = load_settings()
@@ -146,11 +143,13 @@ class App:
         self.mode = tk.StringVar(value=settings.get("mode", "csv"))
         self.csv_path = tk.StringVar(value=settings.get("csv_path", ""))
         self.link = tk.StringVar(value=settings.get("link", ""))
+        self.query_text = str(settings.get("query", ""))
+        self.last_status_update = 0.0
         self.out_dir = tk.StringVar(value=settings.get("out_dir", str(DEFAULT_OUT)))
         self.bitrate = tk.StringVar(value=settings.get("bitrate", "320k"))
-        self.threads = tk.IntVar(value=int(settings.get("threads", 4)))
+        self.threads = tk.IntVar(value=int(settings.get("threads", 3)))
         self.only_verified = tk.BooleanVar(value=bool(settings.get("only_verified", False)))
-        self.status = tk.StringVar(value="Выберите CSV-файл или вставьте ссылку Spotify, затем нажмите «Проверить» или «Скачать».")
+        self.status = tk.StringVar(value="Выберите CSV-файл, вставьте ссылку Spotify или введите названия треков, затем нажмите «Проверить» или «Скачать».")
         self.timing = tk.StringVar(value="")
         self.percent = tk.StringVar(value="")
         self.counters = {name: tk.StringVar(value="—") for name in ("total", "existing", "found", "missing", "done")}
@@ -158,7 +157,7 @@ class App:
         from musicdl.updater import version_label
 
         self.version = version_label()
-        root.title(f"musicdl — скачивание музыки ({self.version})")
+        root.title(f"musicdl {self.version} — скачивание музыки")
         root.minsize(900, 640)
         root.geometry("1120x780")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -199,7 +198,7 @@ class App:
         source_card, source = self._card(top, "Откуда брать треки")
         source_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         source.columnconfigure(1, weight=1)
-        ttk.Radiobutton(source, text="CSV из TuneMyMusic", value="csv", variable=self.mode, command=self._on_mode_change).grid(
+        ttk.Radiobutton(source, text="CSV", value="csv", variable=self.mode, command=self._on_mode_change).grid(
             row=0, column=0, sticky="w"
         )
         self.csv_entry = ttk.Entry(source, textvariable=self.csv_path)
@@ -213,6 +212,15 @@ class App:
         self.link_entry.grid(row=1, column=1, sticky="ew", padx=8, pady=(8, 0))
         self.paste_button = ttk.Button(source, text="Вставить", command=self.paste_link)
         self.paste_button.grid(row=1, column=2, sticky="ew", pady=(8, 0))
+        ttk.Radiobutton(source, text="Названия треков", value="text", variable=self.mode, command=self._on_mode_change).grid(
+            row=2, column=0, sticky="nw", pady=(8, 0)
+        )
+        self.query_box = tk.Text(source, height=3, wrap="word", relief="flat", borderwidth=0, highlightthickness=1, undo=True)
+        self.query_box.grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.query_box.insert("1.0", self.query_text)
+        ttk.Label(source, text="по одному треку в строке: «Артист - Название»", foreground=self._color("muted")).grid(
+            row=3, column=1, columnspan=2, sticky="w", padx=8
+        )
 
         target_card, target = self._card(top, "Куда и как сохранять")
         target_card.grid(row=0, column=1, sticky="nsew")
@@ -223,7 +231,7 @@ class App:
         options.grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
         ttk.Label(options, text="Качество").pack(side="left")
         ttk.Combobox(options, textvariable=self.bitrate, values=BITRATES, width=6, state="readonly").pack(side="left", padx=(6, 14))
-        ttk.Label(options, text="Поиск одновременно").pack(side="left")
+        ttk.Label(options, text="Одновременно").pack(side="left")
         ttk.Spinbox(options, from_=1, to=8, textvariable=self.threads, width=4).pack(side="left", padx=6)
         verified_box = ttk.Frame(target)
         verified_box.grid(row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -310,7 +318,21 @@ class App:
     def _theme_icon(self) -> str:
         return "☀" if self.theme == "dark" else "🌙"
 
+    def _style_query_box(self) -> None:
+        style = ttk.Style()
+        background = style.lookup("TEntry", "fieldbackground") or style.lookup("TEntry", "background") or "white"
+        foreground = style.lookup("TEntry", "foreground") or "black"
+        self.query_box.configure(
+            background=background,
+            foreground=foreground,
+            insertbackground=foreground,
+            highlightbackground=self._color("muted"),
+            highlightcolor=self._color("accent"),
+            font=ui_font(10),
+        )
+
     def _apply_tags(self) -> None:
+        self._style_query_box()
         for tag in ("ok", "bad", "active", "muted"):
             self.table.tag_configure(tag, foreground=self._color(tag))
         for number, color in self.tile_labels.values():
@@ -323,11 +345,12 @@ class App:
         self._save()
 
     def _on_mode_change(self) -> None:
-        csv_mode = self.mode.get() == "csv"
-        self.csv_entry.configure(state="normal" if csv_mode else "disabled")
-        self.csv_button.configure(state="normal" if csv_mode else "disabled")
-        self.link_entry.configure(state="disabled" if csv_mode else "normal")
-        self.paste_button.configure(state="disabled" if csv_mode else "normal")
+        mode = self.mode.get()
+        self.csv_entry.configure(state="normal" if mode == "csv" else "disabled")
+        self.csv_button.configure(state="normal" if mode == "csv" else "disabled")
+        self.link_entry.configure(state="normal" if mode == "url" else "disabled")
+        self.paste_button.configure(state="normal" if mode == "url" else "disabled")
+        self.query_box.configure(state="normal" if mode == "text" else "disabled")
 
     # ---------------------------------------------------------------- actions
     def choose_csv(self) -> None:
@@ -370,6 +393,9 @@ class App:
 
             webbrowser.open(link)
 
+    def _query(self) -> str:
+        return self.query_box.get("1.0", "end").strip()
+
     def _validate(self) -> Optional[str]:
         if self.mode.get() == "csv":
             path = self.csv_path.get().strip()
@@ -377,6 +403,9 @@ class App:
                 return "Выберите CSV-файл (кнопка «Выбрать файл…»)."
             if not Path(path).is_file():
                 return f"Файл не найден:\n{path}"
+        elif self.mode.get() == "text":
+            if not self._query():
+                return "Введите названия треков: по одному в строке, например «Aarne - CULTURE»."
         else:
             from musicdl.spotify_input import SpotifyInputError, check_url
 
@@ -399,10 +428,10 @@ class App:
     def options(self, dry_run: bool):
         from musicdl.job import JobOptions
 
-        csv_mode = self.mode.get() == "csv"
+        mode = self.mode.get()
         return JobOptions(
-            source_kind="csv" if csv_mode else "url",
-            source=self.csv_path.get().strip() if csv_mode else self.link.get().strip(),
+            source_kind=mode,
+            source={"csv": self.csv_path.get, "url": self.link.get, "text": self._query}[mode]().strip(),
             out_dir=Path(self.out_dir.get().strip()),
             threads=int(self.threads.get()),
             bitrate=self.bitrate.get(),
@@ -423,7 +452,6 @@ class App:
         self.table.delete(*self.table.get_children())
         self.rows.clear()
         self.links.clear()
-        self.active.clear()
         self.report = None
         self.report_button.configure(state="disabled")
         for var in self.counters.values():
@@ -476,21 +504,19 @@ class App:
 
     # ------------------------------------------------------------ UI updates
     def _poll(self) -> None:
+        """Apply queued events, but never for longer than a moment: a burst of
+        events must not keep the window from redrawing and reacting."""
+        deadline = time.monotonic() + 0.03
         try:
-            while True:
+            while time.monotonic() < deadline:
                 event = self.events.get_nowait()
                 getattr(self, f"_on_{event[0]}")(*event[1:])
         except queue.Empty:
             pass
-        self.root.after(80, self._poll)
+        self.root.after(60, self._poll)
 
     def _tick(self) -> None:
-        """Spinner on active rows + elapsed / remaining time."""
-        self.spin = (self.spin + 1) % len(SPINNER)
-        frame = SPINNER[self.spin]
-        for item, text in list(self.active.items()):
-            if self.table.exists(item):
-                self.table.set(item, "status", f"{frame}  {text}")
+        """Elapsed / remaining time (once a second, no row animations)."""
         if self.worker and self.worker.is_alive() and self.started:
             elapsed = time.monotonic() - self.started
             text = f"прошло {format_seconds(elapsed)}"
@@ -499,7 +525,7 @@ class App:
                 remaining = per_item * (self.phase_total - self.phase_done)
                 text += f" · осталось ≈ {format_seconds(remaining)}"
             self.timing.set(text)
-        self.root.after(110, self._tick)
+        self.root.after(1000, self._tick)
 
     def _advance(self) -> None:
         self.phase_done += 1
@@ -553,11 +579,13 @@ class App:
     def _on_searching(self, key: str, source: str) -> None:
         item = self.rows.get(key)
         if item is not None:
-            self.active[item] = f"ищу · {source}"
             self.table.item(item, tags=("active",))
-            track = self.table.set(item, "track")
-            if not self.offline:
-                self.status.set(f"Ищу {self.searched + 1}–{min(self.search_total, self.searched + int(self.threads.get()) * 2)} из {self.search_total}: «{track}» на {source}…")
+            self.table.set(item, "status", f"🔍 ищу · {source}")
+            now = time.monotonic()
+            if not self.offline and now - self.last_status_update > 0.4:
+                self.last_status_update = now
+                track = self.table.set(item, "track")
+                self.status.set(f"Ищу трек {self.searched + 1} из {self.search_total}: «{track}» на {source}…")
 
     def _on_match(self, match, dry_run: bool) -> None:
         from musicdl.matching import CANCELLED
@@ -568,7 +596,6 @@ class App:
         item = self.rows.get(match.song.url)
         if item is None:
             return
-        self.active.pop(item, None)
         values = (self.table.set(item, "n"), self.table.set(item, "track"))
         if match.found:
             self._bump("found")
@@ -612,28 +639,24 @@ class App:
                 self.progress.configure(value=self.phase_done)
                 count = self.counters["missing"]
                 count.set(str(max(0, int(count.get() or 0) - 1)))
-            self.active[item] = "повторная загрузка…"
-            self.table.set(item, "status", "повторная загрузка…")
+            self.table.set(item, "status", "⏳ повторная загрузка…")
             self.table.item(item, tags=("active",))
             return
         if current in FINAL_STATUSES:
             return
         if status in ("Done", "Error", "Skipped"):
-            self.active.pop(item, None)
             self.table.set(item, "status", human_status(status, percent))
             self.table.item(item, tags=("bad",) if status == "Error" else ("ok",))
             self._advance()
             self._bump("missing" if status == "Error" else "done")
         else:
-            self.active[item] = human_status(status, percent)
+            self.table.set(item, "status", f"⏳ {human_status(status, 0)}")
             self.table.item(item, tags=("active",))
-            self.table.see(item)
 
     def _on_done(self, summary, dry_run: bool) -> None:
         self._set_busy(False)
         self.offline = False
         self.status_label.configure(foreground="")
-        self.active.clear()
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=1, value=1)
         self.percent.set("100%")
@@ -663,7 +686,6 @@ class App:
 
     def _on_error(self, message: str, details: Optional[str]) -> None:
         self._set_busy(False)
-        self.active.clear()
         self.progress.stop()
         self.progress.configure(mode="determinate", value=0)
         self.status.set(f"Ошибка: {message}")
@@ -682,6 +704,7 @@ class App:
                 "mode": self.mode.get(),
                 "csv_path": self.csv_path.get(),
                 "link": self.link.get(),
+                "query": self._query(),
                 "out_dir": self.out_dir.get(),
                 "bitrate": self.bitrate.get(),
                 "threads": int(self.threads.get()),

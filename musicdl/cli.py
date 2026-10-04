@@ -23,7 +23,7 @@ console = Console()
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-o", "--out", type=Path, default=Path("music"), help="папка для mp3 (по умолчанию ./music)")
-    common.add_argument("-t", "--threads", type=int, default=4, help="параллельных поисков (по умолчанию 4); треки скачиваются по одному")
+    common.add_argument("-t", "--threads", type=int, default=3, help="параллельных загрузок (по умолчанию 3); поиск идёт вдвое быстрее")
     common.add_argument("--dry-run", action="store_true", help="только поиск и сопоставление, без скачивания")
     common.add_argument("--bitrate", default="320k", help="битрейт mp3, например 192k или 320k (по умолчанию 320k)")
     common.add_argument("--report", type=Path, help="куда писать not_found.csv (по умолчанию в папку --out)")
@@ -43,6 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_url = sub.add_parser("url", parents=[common], help="ссылка Spotify: трек, альбом или плейлист")
     p_url.add_argument("link", help="https://open.spotify.com/...")
     p_url.add_argument("--env", type=Path, help="файл с ключами (по умолчанию ./.env)")
+
+    p_text = sub.add_parser("text", parents=[common], help="названия треков: «Артист - Название» (несколько — через пробел в кавычках)")
+    p_text.add_argument("tracks", nargs="+", help='"Aarne - CULTURE" "Baby Cute - hooligang"')
+    p_text.add_argument("--env", type=Path, help="файл с ключами (по умолчанию ./.env)")
     return parser
 
 
@@ -81,7 +85,7 @@ def match_table(matches: List[MatchResult]) -> Table:
 def options_from_args(args: argparse.Namespace) -> JobOptions:
     return JobOptions(
         source_kind=args.mode,
-        source=str(args.file) if args.mode == "csv" else args.link,
+        source={"csv": lambda: str(args.file), "url": lambda: args.link, "text": lambda: "\n".join(args.tracks)}[args.mode](),
         out_dir=args.out,
         threads=args.threads,
         bitrate=args.bitrate,

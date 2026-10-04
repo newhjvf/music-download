@@ -6,6 +6,7 @@ quality on Bandcamp needs a purchase or the e-mail "free download" form)."""
 from __future__ import annotations
 
 import html
+import logging
 import re
 from typing import Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -14,7 +15,9 @@ import requests
 from spotdl.providers.audio.base import AudioProvider
 from spotdl.types.result import Result
 
+logger = logging.getLogger(__name__)
 SEARCH_URL = "https://bandcamp.com/search"
+_diagnosed = 0  # how many "page without results" reports were written
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:93.0) Gecko/20100101 Firefox/93.0"
 
 _ITEM = re.compile(r'<li[^>]*class="[^"]*searchresult[^"]*"[^>]*>(.*?)</li>', re.S)
@@ -64,15 +67,29 @@ class Bandcamp(AudioProvider):
     GET_RESULTS_OPTS: List[Dict[str, object]] = [{}]
 
     def get_results(self, search_term: str, *_args, **_kwargs) -> List[Result]:
+        global _diagnosed
+        query = re.sub(r"\s+[-–—]\s+", " ", search_term)  # "artist - title" -> "artist title"
         response = requests.get(
             SEARCH_URL,
-            params={"q": search_term, "item_type": "t"},
+            params={"q": query, "item_type": "t"},
             headers={"User-Agent": USER_AGENT},
             timeout=20,
         )
         response.raise_for_status()
+        hits = parse_search(response.text)
+        if not hits and _diagnosed < 3:
+            # Tells whether Bandcamp really had nothing or its page changed / blocked us.
+            _diagnosed += 1
+            logger.info(
+                "Bandcamp page without track results for %r: HTTP %s, %d bytes, searchresult markers: %d, starts with: %r",
+                query,
+                response.status_code,
+                len(response.text),
+                response.text.count("searchresult"),
+                _text(response.text[:3000])[:200],
+            )
         results = []
-        for hit in parse_search(response.text)[:15]:
+        for hit in hits[:15]:
             artist = str(hit["artist"])
             results.append(
                 Result(

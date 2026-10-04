@@ -158,30 +158,103 @@ def test_cache_from_older_matching_rules_is_ignored(tmp_path):
     assert MatchCache(path).entries == {}
 
 
-def test_tracks_are_downloaded_one_at_a_time(monkeypatch, tmp_path):
-    from musicdl import job
+class FakeSong:
+    def __init__(self, url="spotify:1", download_url="https://www.youtube.com/watch?v=main"):
+        self.url = url
+        self.download_url = download_url
 
-    captured = {}
+
+def fake_downloader_class(settings_out, behaviour):
+    """spotDL Downloader stand-in: ``behaviour(song)`` -> path or None."""
 
     class FakeDownloader:
         errors: list = []
         progress_handler = type("P", (), {})()
 
         def __init__(self, settings):
-            captured.update(settings)
+            settings_out.update(settings)
 
         def download_multiple_songs(self, songs):
-            return []
+            return [(song, behaviour(song)) for song in songs]
 
+    return FakeDownloader
+
+
+def test_downloads_use_the_thread_setting(monkeypatch, tmp_path):
+    from musicdl import job
     import spotdl.download.downloader as spotdl_downloader
 
-    monkeypatch.setattr(spotdl_downloader, "Downloader", FakeDownloader)
+    captured = {}
+    monkeypatch.setattr(spotdl_downloader, "Downloader", fake_downloader_class(captured, lambda s: None))
     monkeypatch.setattr(job, "ensure_deno", lambda: None)
     monkeypatch.setattr(job, "log_download_causes", lambda: None)
     monkeypatch.setattr(job, "original_soundcloud_files", lambda songs: {})
-    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path, threads=8)
-    job.download_songs([object()], options, lambda *a: None)
-    assert captured["threads"] == 1
+    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path, threads=5)
+    job.download_songs([FakeSong()], options, lambda *a: None)
+    assert captured["threads"] == 5
+
+
+def test_failed_download_is_retried_from_alternate_sources(monkeypatch, tmp_path):
+    from musicdl import job
+    import spotdl.download.downloader as spotdl_downloader
+
+    good = tmp_path / "a.mp3"
+    good.write_bytes(b"0" * job.MIN_FILE_SIZE)
+    tried = []
+
+    def behaviour(song):
+        tried.append(song.download_url)
+        return good if song.download_url.endswith("ok") else None  # first two are DRM / 403
+
+    monkeypatch.setattr(spotdl_downloader, "Downloader", fake_downloader_class({}, behaviour))
+    monkeypatch.setattr(job, "ensure_deno", lambda: None)
+    monkeypatch.setattr(job, "log_download_causes", lambda: None)
+    monkeypatch.setattr(job, "original_soundcloud_files", lambda songs: {})
+    song = FakeSong()
+    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path)
+    options.alternates = {"spotify:1": ["https://soundcloud.com/drm", "https://bandcamp.com/ok", "https://never"]}
+    results = job.download_songs([song], options, lambda *a: None)
+    assert tried == ["https://www.youtube.com/watch?v=main", "https://soundcloud.com/drm", "https://bandcamp.com/ok"]
+    assert results == [(song, good)]
+
+
+def test_all_sources_failing_returns_the_failure(monkeypatch, tmp_path):
+    from musicdl import job
+    import spotdl.download.downloader as spotdl_downloader
+
+    monkeypatch.setattr(spotdl_downloader, "Downloader", fake_downloader_class({}, lambda s: None))
+    monkeypatch.setattr(job, "ensure_deno", lambda: None)
+    monkeypatch.setattr(job, "log_download_causes", lambda: None)
+    monkeypatch.setattr(job, "original_soundcloud_files", lambda songs: {})
+    song = FakeSong()
+    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path)
+    options.alternates = {"spotify:1": ["https://other"]}
+    results = job.download_songs([song], options, lambda *a: None)
+    assert results == [(song, None)]
+
+
+def test_progress_forwards_stage_changes_only(monkeypatch, tmp_path):
+    from musicdl import job
+    import spotdl.download.downloader as spotdl_downloader
+
+    holder = {}
+
+    class Downloader(fake_downloader_class({}, lambda s: None)):
+        def __init__(self, settings):
+            super().__init__(settings)
+            holder["handler"] = self.progress_handler
+
+    monkeypatch.setattr(spotdl_downloader, "Downloader", Downloader)
+    monkeypatch.setattr(job, "ensure_deno", lambda: None)
+    monkeypatch.setattr(job, "log_download_causes", lambda: None)
+    monkeypatch.setattr(job, "original_soundcloud_files", lambda songs: {})
+    seen = []
+    options = job.JobOptions(source_kind="csv", source="x", out_dir=tmp_path)
+    job.download_songs([FakeSong()], options, lambda key, status, percent: seen.append((status, percent)))
+    tracker = type("T", (), {"song": FakeSong(), "progress": 40})()
+    for message in ("Downloading", "Downloading", "Downloading", "Converting", "Converting", "Done"):
+        holder["handler"].update_callback(tracker, message)
+    assert seen == [("Downloading", 0), ("Converting", 0), ("Done", 0)]
 
 
 def test_ensure_deno_never_raises(monkeypatch):
@@ -275,3 +348,85 @@ def test_failed_original_file_falls_back_to_the_stream(monkeypatch, tmp_path):
     results = job.download_songs([song], options, lambda *a: None)
     assert calls == ["https://cdn.example/original.wav", "https://soundcloud.com/a/b"]
     assert results == [(song, good)]
+
+
+# --- typed tracks and track data ---------------------------------------------
+
+SPOTIFY_RAW = {
+    "name": "CULTURE",
+    "artists": [{"name": "Aarne"}],
+    "album": {"name": "CULTURE EP", "release_date": "2024-05-17", "total_tracks": 4, "images": [{"url": "c.jpg", "width": 640}]},
+    "track_number": 2,
+    "duration_ms": 185000,
+}
+
+
+def patch_spotify(monkeypatch):
+    from musicdl import job, metadata
+
+    monkeypatch.setattr(job, "init_spotify_quietly", lambda options, info: True)
+    monkeypatch.setattr(metadata, "find_on_spotify", lambda song: metadata.track_info(SPOTIFY_RAW))
+    monkeypatch.setattr(metadata, "find_free_text", lambda text: metadata.track_info(SPOTIFY_RAW) if "culture" in text.lower() else None)
+
+
+def test_typed_tracks_get_full_data_and_are_searched(monkeypatch, tmp_path):
+    from musicdl import job
+
+    patch_spotify(monkeypatch)
+    found = make_result("c1", "CULTURE", ["Aarne"], 185)
+    messages = []
+    summary = job.run_job(
+        job.JobOptions(source_kind="text", source="aarne - culture\nculture\nnonsense words", out_dir=tmp_path, dry_run=True, cache_path=None),
+        job.JobEvents(info=messages.append),
+        provider_factory=lambda: StubProvider({"aarne - culture": [found]}),
+        ffmpeg_check=lambda i: None,
+    )
+    assert summary.total == 1  # both lines are the same track, the third is not understood
+    match = summary.matches[0]
+    assert match.found and match.song.name == "CULTURE" and match.song.album_name == "CULTURE EP"
+    assert match.song.year == 2024 and match.song.cover_url == "c.jpg" and match.song.track_number == 2
+    assert any("пропустил строк: 1" in m for m in messages)
+
+
+def test_empty_typed_text_is_an_error(tmp_path):
+    from musicdl import job
+
+    with pytest.raises(job.JobError):
+        job.run_job(job.JobOptions(source_kind="text", source="  \n ", out_dir=tmp_path), provider_factory=lambda: StubProvider({}))
+
+
+def test_csv_tracks_get_missing_tags_from_spotify(monkeypatch, tmp_path):
+    from musicdl import job
+
+    patch_spotify(monkeypatch)
+    csv_file = tmp_path / "t.csv"
+    csv_file.write_text("Track name,Artist name\nCULTURE,Aarne\n", encoding="utf-8")
+    downloaded = []
+
+    def downloader(songs, options, on_status):
+        downloaded.extend(songs)
+        return fake_download(songs, options, on_status)
+
+    options = job.JobOptions(source_kind="csv", source=str(csv_file), out_dir=tmp_path / "out", cache_path=None)
+    found = make_result("c1", "CULTURE", ["Aarne"], 185)
+    job.run_job(options, provider_factory=lambda: StubProvider({"aarne - culture": [found]}), downloader=downloader, ffmpeg_check=lambda i: None)
+    song = downloaded[0]
+    assert song.album_name == "CULTURE EP" and song.year == 2024 and song.cover_url == "c.jpg"
+    assert song.track_number == 2 and song.tracks_count == 4  # CSV placeholders replaced
+    assert song.name == "CULTURE" and song.url.startswith("https://musicdl.local/")  # identity unchanged
+
+
+def test_album_falls_back_to_source_album_then_title():
+    from musicdl.csv_import import TrackRow, row_to_song
+    from musicdl.matching import MatchResult
+    from musicdl.pipeline import prepare_for_download
+
+    plain = row_to_song(TrackRow(line=2, title="Single", artists=["X"]))
+    with_source = row_to_song(TrackRow(line=3, title="Song", artists=["X"]))
+    songs = prepare_for_download(
+        [
+            MatchResult(song=plain, url="https://www.youtube.com/watch?v=a"),
+            MatchResult(song=with_source, url="https://www.youtube.com/watch?v=b", album="Source Album"),
+        ]
+    )
+    assert [s.album_name for s in songs] == ["Single", "Source Album"]
