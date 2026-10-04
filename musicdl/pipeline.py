@@ -81,6 +81,8 @@ def prepare_for_download(matches: Iterable[MatchResult]) -> List[Song]:
             continue
         song = match.song
         song.download_url = match.url
+        if not song.album_name:  # tags should always have an album: the source's, else the title (a single)
+            song.album_name = match.album or song.name
         if not song.cover_url:
             song.cover_url = youtube_cover_url(match.url or "")
         songs.append(song)

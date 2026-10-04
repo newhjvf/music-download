@@ -34,7 +34,7 @@ DEFAULT_CACHE = Path.home() / ".musicdl" / "matches.json"
 
 @dataclass
 class JobOptions:
-    source_kind: str  # "csv" | "url"
+    source_kind: str  # "csv" | "url" | "text"
     source: str  # CSV path or Spotify link
     out_dir: Path = Path("music")
     threads: int = 4
@@ -46,6 +46,7 @@ class JobOptions:
     # None = always search; read at creation so tests can redirect it
     cache_path: Optional[Path] = field(default_factory=lambda: DEFAULT_CACHE)
     cancel: Optional[threading.Event] = None  # set it to stop after the current tracks
+    alternates: Dict[str, List[str]] = field(default_factory=dict)  # song.url -> other URLs to try if a download fails
 
     @property
     def report(self) -> Path:
@@ -100,6 +101,9 @@ def load_songs(
         except UnicodeDecodeError as exc:
             raise JobError(f"{path.name}: файл не в кодировке UTF-8") from exc
 
+    if options.source_kind == "text":
+        return songs_from_typed_text(options, info, guard)
+
     from musicdl.spotify_input import (
         SpotifyInputError,
         check_url,
@@ -117,6 +121,37 @@ def load_songs(
     info("Получаю список треков из Spotify… (большой плейлист — до минуты)")
     songs = retry_on_network(lambda: songs_from_url(options.source, options.threads), guard)
     info(f"Из Spotify получено треков: {len(songs)}")
+    return songs
+
+
+def init_spotify_quietly(options: "JobOptions", info: Callable[[str], None]) -> bool:
+    """Start the keyless Spotify client for metadata lookups; False if that
+    does not work (the program then works with what it has)."""
+    from musicdl.spotify_input import init_spotify, load_credentials
+
+    try:
+        init_spotify(*load_credentials(options.env_file))
+        return True
+    except Exception as exc:
+        logger.warning("Spotify is not available for track data: %s", exc)
+        info("Spotify недоступен — данные треков (альбом, обложка) не подтянуть, работаю с тем, что есть.")
+        return False
+
+
+def songs_from_typed_text(options: "JobOptions", info: Callable[[str], None], guard: Optional[ConnectionGuard]) -> List[Song]:
+    """Typed tracks, one per line ('Artist - Title' or free words): full track
+    data comes from Spotify, so the tags are complete."""
+    from musicdl.metadata import enrich_songs, songs_from_text
+
+    if not options.source.strip():
+        raise JobError("Введите название трека (по одному в строке).")
+    init_spotify_quietly(options, info)
+    info("Ищу данные треков…")
+    songs, skipped = retry_on_network(lambda: songs_from_text(options.source), guard)
+    if skipped:
+        info(f"Не нашёл в Spotify и пропустил строк: {len(skipped)} (пишите «Артист - Название»).")
+        logger.info("Skipped lines: %s", skipped)
+    songs = enrich_songs(songs, prefer_found=True, canonical=True, only_missing=False)
     return songs
 
 
@@ -180,7 +215,10 @@ def original_soundcloud_files(songs: List[Song]) -> Dict[str, str]:
                 song.download_url = original
         except Exception as exc:  # login required, limit reached, no network...
             logger.info("No original file for %s: %s", song.download_url, exc)
-    logger.info("SoundCloud original files: %d of %d tracks", switched, len(targets))
+            if "401" in str(exc) or "403" in str(exc):
+                logger.info("SoundCloud wants a login for original files (SOUNDCLOUD_AUTH_TOKEN); not asking again")
+                break
+    logger.info("SoundCloud original files: %d of %d tracks", len(switched), len(targets))
     return switched
 
 
@@ -210,7 +248,10 @@ def download_songs(
     options: JobOptions,
     on_status: Callable[[str, str, int], None],
 ) -> List[Tuple[Song, Optional[Path]]]:
-    """spotDL's Downloader with its progress forwarded to ``on_status``."""
+    """spotDL's Downloader (``options.threads`` tracks at once: while one is
+    converted by ffmpeg the others keep downloading) with stage changes
+    forwarded to ``on_status``. A track whose file cannot be downloaded is
+    retried from its alternative sources."""
     from spotdl.download.downloader import Downloader
 
     if not songs:
@@ -219,24 +260,46 @@ def download_songs(
     ensure_deno()
     log_download_causes()
     switched = original_soundcloud_files(songs)
-    # One track at a time: parallel downloads made YouTube/SoundCloud refuse
-    # requests and flooded the connection; "threads" is for searching only.
-    downloader = Downloader(downloader_settings(options.out_dir, 1, options.bitrate))
-    downloader.progress_handler.update_callback = lambda tracker, message: on_status(
-        tracker.song.url, message, int(tracker.progress or 0)
-    )
-    results = downloader.download_multiple_songs(songs)
-    # An original file that did not download: go back to the normal stream.
-    fallback = [song for song, path in results if not is_complete(path) and song.url in switched]
-    if fallback:
-        for song in fallback:
-            song.download_url = switched[song.url]
-        logger.info("Original SoundCloud files failed for %d tracks, using the stream", len(fallback))
-        retried = {song.url: path for song, path in downloader.download_multiple_songs(fallback)}
-        results = [(song, retried.get(song.url, path)) for song, path in results]
+    downloader = Downloader(downloader_settings(options.out_dir, max(1, options.threads), options.bitrate))
+
+    last_stage: Dict[str, str] = {}
+
+    def on_progress(tracker, message) -> None:
+        # Only stage changes, never percentages: hundreds of updates per
+        # second made the window feel frozen.
+        key = tracker.song.url
+        if last_stage.get(key) != message:
+            last_stage[key] = message
+            on_status(key, message, 0)
+
+    downloader.progress_handler.update_callback = on_progress
+
+    # Where to go next if a file cannot be downloaded: the plain stream of an
+    # "original file" first, then the other trusted matches of the track.
+    fallbacks: Dict[str, List[str]] = {}
+    for song in songs:
+        urls = [switched[song.url]] if song.url in switched else []
+        urls += [url for url in options.alternates.get(song.url, []) if url not in urls]
+        fallbacks[song.url] = urls
+
+    by_url = {song.url: song for song in songs}
+    results = {song.url: (song, path) for song, path in downloader.download_multiple_songs(songs)}
+    while True:
+        retry = [
+            by_url[url]
+            for url, (_, path) in results.items()
+            if not is_complete(path) and fallbacks.get(url)
+        ]
+        if not retry or (options.cancel is not None and options.cancel.is_set()):
+            break
+        for song in retry:
+            song.download_url = fallbacks[song.url].pop(0)
+        logger.info("Download failed for %d tracks, trying another source", len(retry))
+        for song, path in downloader.download_multiple_songs(retry):
+            results[song.url] = (song, path)
     for error in downloader.errors:
         logger.warning(error)
-    return results
+    return [results[song.url] for song in songs if song.url in results]
 
 
 def retry_on_network(action: Callable, guard: Optional[ConnectionGuard], attempts: int = 5):
@@ -258,6 +321,22 @@ def retry_on_network(action: Callable, guard: Optional[ConnectionGuard], attempt
 
 def is_complete(path: Optional[Path]) -> bool:
     return path is not None and Path(path).is_file() and Path(path).stat().st_size >= MIN_FILE_SIZE
+
+
+def fill_track_data(matches: List[MatchResult], options: JobOptions, info: Callable[[str], None]) -> None:
+    """Complete album, year, cover and track number of the tracks about to be
+    downloaded from Spotify (CSV rows and some playlist items lack them)."""
+    from musicdl.metadata import enrich_songs, needs_metadata
+
+    found = [match for match in matches if match.found]
+    if not any(needs_metadata(match.song) for match in found):
+        return
+    info("Дополняю данные треков (альбом, год, обложка)…")
+    if not init_spotify_quietly(options, info):
+        return
+    enriched = enrich_songs([match.song for match in found], prefer_found=options.source_kind == "csv")
+    for match, song in zip(found, enriched):
+        match.song = song
 
 
 def search_threads(download_threads: int) -> int:
@@ -325,6 +404,8 @@ def run_job(
 
     cancelled = options.cancel is not None and options.cancel.is_set()
     if not options.dry_run and not cancelled:
+        fill_track_data(summary.matches, options, events.info)
+        options.alternates = {m.song.url: m.alternates for m in summary.matches if m.found and m.alternates}
         to_download = prepare_for_download(summary.matches)
         if to_download:
             retry_on_network(lambda: ffmpeg_check(events.info), guard)

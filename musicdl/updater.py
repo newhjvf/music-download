@@ -40,6 +40,7 @@ MANAGED = (
     "examples",
     "tests",
     "README.md",
+    "CHANGELOG.md",
     "pyproject.toml",
     "install.bat",
     "start.bat",
@@ -146,15 +147,11 @@ def apply_update(zip_bytes: bytes, root: Path) -> bool:
 
 
 def version_label(root: Optional[Path] = None) -> str:
-    """'версия от 01.10.2026 14:05' for the window title."""
+    """'v1.2.3' for the window title ('v1.2.3 · разработка' in a git checkout)."""
+    from musicdl import __version__
+
     root = root or install_root()
-    if root is None:
-        return "версия для разработки"
-    state = read_state(root)
-    date = state.get("date", "")
-    if len(date) >= 16:
-        return f"версия от {date[8:10]}.{date[5:7]}.{date[0:4]} {date[11:16]} UTC"
-    return "версия не определена"
+    return f"v{__version__}" if root is not None else f"v{__version__} · разработка"
 
 
 def console_python() -> str:

@@ -54,6 +54,8 @@ class MatchCache:
             duration=entry.get("duration", 0.0),
             verified=entry.get("verified", False),
             source=entry.get("source", ""),
+            album=entry.get("album", ""),
+            alternates=list(entry.get("alternates", [])),
         )
 
     def put(self, match: MatchResult, only_verified: bool) -> None:
@@ -66,6 +68,8 @@ class MatchCache:
             "duration": match.duration,
             "verified": match.verified,
             "source": match.source,
+            "album": match.album,
+            "alternates": match.alternates,
             "time": time.time(),
         }
 

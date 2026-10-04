@@ -80,6 +80,8 @@ class MatchResult:
     error: Optional[str] = None
     source: str = ""  # "YouTube Music" / "YouTube" / "SoundCloud"
     network_error: bool = False  # failed because the connection was (probably) lost
+    album: str = ""  # album the source knows (fallback for the tags)
+    alternates: List[str] = dataclasses.field(default_factory=list)  # other trusted URLs, tried if the download fails
 
     @property
     def found(self) -> bool:
@@ -386,6 +388,28 @@ def choose(
     return None
 
 
+MAX_ALTERNATES = 3
+
+
+def _alternates(song: Song, candidates: List[Candidate], best: Candidate, only_official: bool) -> List[str]:
+    """Other URLs worth trying if the chosen one cannot be downloaded (DRM,
+    403, sign-in wall): only official ones, or non-YouTube uploads of the
+    right length, so no extra video lookups are needed."""
+    urls: List[str] = []
+    for candidate in sorted(candidates, key=lambda c: c.value, reverse=True):
+        url = candidate.result.url
+        if candidate is best or url == best.result.url or url in urls:
+            continue
+        if not candidate.official:
+            gap = _duration_gap(song, candidate.result)
+            if only_official or _is_youtube_video(url) or (gap is not None and gap > MAX_REUPLOAD_DIFF):
+                continue
+        urls.append(url)
+        if len(urls) == MAX_ALTERNATES:
+            break
+    return urls
+
+
 def find_match(
     providers: Union[AudioProvider, Sequence[AudioProvider]],
     song: Song,
@@ -448,6 +472,8 @@ def find_match(
             duration=result.duration,
             verified=best.official or best.licensed,
             source=best.source,
+            album=result.album or "",
+            alternates=_alternates(song, candidates, best, only_verified),
         )
     if not used_any:
         failure = getattr(providers, "last_error", None)
